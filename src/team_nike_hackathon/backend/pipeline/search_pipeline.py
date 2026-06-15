@@ -10,6 +10,7 @@ from typing import Any
 
 from ..db.databricks_sql import DatabricksSQLClient
 from ..db.facility_queries import search_facilities, get_district_health
+from ..db.vector_search import hybrid_search
 from ..scoring.trust_scorer import score_facility, TrustSignal
 from ..scoring.evidence_formatter import format_evidence
 from ..agents.query_agent import parse_query_with_llm
@@ -54,7 +55,7 @@ def run_search(
     else:
         parsed = keyword_parse(db, raw_query)
 
-    # Step 2: Search facilities
+    # Step 2: Search facilities (keyword SQL)
     location = parsed.get("location")
     candidates = search_facilities(
         db,
@@ -65,6 +66,15 @@ def run_search(
         district=location["district"] if location else None,
         limit=limit,
     )
+
+    # Step 2b: Hybrid search — merge with vector search results
+    if use_agents:
+        state_filter = {"address_stateOrRegion": location["state"]} if location and location.get("state") else None
+        candidates = hybrid_search(
+            raw_query, candidates,
+            num_vector_results=limit,
+            filters=state_filter,
+        )
 
     # Step 3: Rule-based scoring for all candidates
     scored = []
