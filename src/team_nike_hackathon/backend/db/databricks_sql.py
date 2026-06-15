@@ -12,12 +12,19 @@ from fastapi import FastAPI, Request
 from ..core._base import LifespanDependency
 from ..core._config import logger
 
-CATALOG = "databricks_virtue_foundation_dataset_dais_2026"
-SCHEMA = "virtue_foundation_dataset"
+BRONZE_CATALOG = "databricks_virtue_foundation_dataset_dais_2026"
+BRONZE_SCHEMA = "virtue_foundation_dataset"
+SILVER_GOLD_CATALOG = "workspace"
+SILVER_GOLD_SCHEMA = "referral_copilot"
+
+
+def _bronze(table: str) -> str:
+    return f"{BRONZE_CATALOG}.{BRONZE_SCHEMA}.{table}"
 
 
 def _fqn(table: str) -> str:
-    return f"{CATALOG}.{SCHEMA}.{table}"
+    """Silver/gold tables in workspace.referral_copilot."""
+    return f"{SILVER_GOLD_CATALOG}.{SILVER_GOLD_SCHEMA}.{table}"
 
 
 class DatabricksSQLClient:
@@ -62,8 +69,8 @@ class DatabricksSQLClient:
 class _DatabricksSQLDependency(LifespanDependency):
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
-        host = os.environ.get("DATABRICKS_HOST", "dbc-cfccb43c-584f.cloud.databricks.com")
-        http_path = os.environ.get("DATABRICKS_HTTP_PATH", "/sql/1.0/warehouses/d03440aca826589a")
+        host = os.environ.get("DATABRICKS_HOST", "dbc-8ca6fd25-084d.cloud.databricks.com")
+        http_path = os.environ.get("DATABRICKS_HTTP_PATH", "/sql/1.0/warehouses/1c11bafa432cc107")
         token = os.environ.get("DATABRICKS_TOKEN", "")
 
         client = DatabricksSQLClient(host, http_path, token)

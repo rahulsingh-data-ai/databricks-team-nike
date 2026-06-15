@@ -46,6 +46,7 @@ def _parse_json_array(value: str | None) -> list[str]:
 
 
 def _count_sources(source_types: str | None) -> int:
+    """Count distinct source types (not duplicates)."""
     sources = _parse_json_array(source_types)
     return len(set(sources))
 
@@ -126,18 +127,18 @@ def score_facility(
     if not source_urls:
         missing.append("No source URLs for verification")
 
-    # Classification logic
+    # Classification logic (thresholds match gold table)
     if is_conflicting:
         signal = TrustSignal.SUSPICIOUS
         summary = _build_suspicious_summary(facility, search_terms)
-    elif in_specialties and num_sources >= 2:
+    elif in_specialties and num_sources >= 3:
         signal = TrustSignal.STRONG
         summary = _build_strong_summary(facility, search_terms, num_sources)
-    elif in_specialties and num_sources == 1:
+    elif in_specialties and num_sources >= 1:
         signal = TrustSignal.PARTIAL
         summary = _build_partial_summary(facility, search_terms, "structured")
     elif in_freetext and num_sources >= 1:
-        signal = TrustSignal.PARTIAL
+        signal = TrustSignal.WEAK
         summary = _build_partial_summary(facility, search_terms, "freetext")
     elif in_freetext:
         signal = TrustSignal.WEAK
