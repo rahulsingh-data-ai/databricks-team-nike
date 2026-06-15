@@ -137,18 +137,17 @@ def search_facilities(
         return []
 
     if state:
-        # Use the pincode-derived state when available (state_resolved),
-        # which catches facilities whose raw address_stateOrRegion is just
-        # a city name like 'Navi Mumbai' or a stale label like 'Orissa'.
+        # `state` is the pincode-derived authoritative value (already lowercased).
+        # Fall back to the raw address_stateOrRegion for the few rows where we
+        # couldn't resolve.
         where_parts.append(
-            f"(LOWER(state_resolved) LIKE {sql_like(state)} "
+            f"(state LIKE {sql_like(state)} "
             f"OR LOWER(address_stateOrRegion) LIKE {sql_like(state)})"
         )
     if district:
         where_parts.append(
-            f"(LOWER(district_resolved) LIKE {sql_like(district)} "
-            f"OR LOWER(address_city) LIKE {sql_like(district)} "
-            f"OR LOWER(address_stateOrRegion) LIKE {sql_like(district)})"
+            f"(district LIKE {sql_like(district)} "
+            f"OR LOWER(address_city) LIKE {sql_like(district)})"
         )
 
     where_clause = " AND ".join(where_parts) if where_parts else "TRUE"
@@ -157,7 +156,9 @@ def search_facilities(
     sql = f"""
     SELECT
         unique_id, name, facilityTypeId, organization_type,
-        address_line1, address_city, address_stateOrRegion, address_zipOrPostcode,
+        address_line1, address_city, address_stateOrRegion,
+        pincode, state, district,
+        pincode_confidence, needs_geo_review,
         latitude, longitude,
         specialties, capability, procedure, equipment,
         source_types, source_ids, source_urls, source_content_id,

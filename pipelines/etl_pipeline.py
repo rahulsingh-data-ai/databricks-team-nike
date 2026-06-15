@@ -329,6 +329,9 @@ FROM enriched
 """)
 print(f"facilities_gold (pre geo-resolve): {spark.table(f'{TARGET}.facilities_gold').count()} rows")
 
+# Drop internal helper columns; they're only needed during the build above.
+spark.sql(f"ALTER TABLE {TARGET}.facilities_gold DROP COLUMNS IF EXISTS (evidence_blob, source_types_lc)")
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -382,57 +385,110 @@ pincode_zones AS (
     (8, ARRAY('bihar','jharkhand'))
   ) AS t(zone, states)
 )
+scored AS (
+  SELECT
+    g.unique_id,
+    TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) AS pin_clean,
+    g.address_zipOrPostcode  AS raw_pincode,
+    g.address_city           AS claimed_city,
+    g.address_stateOrRegion  AS claimed_state,
+    p.statename              AS pin_state,
+    p.district               AS pin_district,
+    sa.canonical             AS alias_state,
+    z.zone                   AS pin_zone,
+    z.states                 AS allowed_states
+  FROM {TARGET}.facilities_gold g
+  LEFT JOIN pin_lookup p
+    ON TRY_CAST(TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) AS BIGINT) = p.pincode
+  LEFT JOIN state_alias sa
+    ON LOWER(TRIM(g.address_stateOrRegion)) = sa.alias
+  LEFT JOIN pincode_zones z
+    ON z.zone = TRY_CAST(SUBSTRING(TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')), 1, 1) AS INT)
+)
 SELECT
-  g.* EXCEPT(address_zipOrPostcode),
-  TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) AS pin_raw,
-  CASE WHEN TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$'
-       THEN TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) END AS address_zipOrPostcode,
-  (TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$') AS pincode_valid_format,
-  p.statename AS pin_state,
-  p.district AS pin_district,
-  LOWER(TRIM(COALESCE(p.statename, sa.canonical, g.address_stateOrRegion))) AS state_resolved,
-  LOWER(TRIM(COALESCE(p.district, g.address_city)))                          AS district_resolved,
-  (p.statename IS NOT NULL
-    AND LOWER(TRIM(p.statename)) <> COALESCE(sa.canonical, LOWER(TRIM(g.address_stateOrRegion)))
-  ) AS pincode_state_mismatch,
-  -- Single-column status with full validation chain:
-  CASE
-    WHEN g.address_zipOrPostcode IS NULL OR TRIM(g.address_zipOrPostcode) = '' THEN 'missing'
-    WHEN NOT (TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$') THEN 'bad_format'
-    WHEN p.statename IS NULL THEN 'unknown_in_directory'
-    WHEN LOWER(TRIM(p.statename)) <> COALESCE(sa.canonical, LOWER(TRIM(g.address_stateOrRegion))) THEN 'state_mismatch'
-    WHEN z.zone IS NOT NULL AND NOT ARRAY_CONTAINS(z.states,
-       LOWER(TRIM(COALESCE(p.statename, sa.canonical, g.address_stateOrRegion)))
-    ) THEN 'wrong_zone'
-    ELSE 'valid'
-  END AS pincode_status,
+  g.*,
+  -- Single clean geo columns
+  CASE WHEN s.pin_clean RLIKE '^[0-9]{{6}}$' THEN s.pin_clean END AS pincode,
+  LOWER(TRIM(COALESCE(s.pin_state, s.alias_state, g.address_stateOrRegion))) AS state,
+  LOWER(TRIM(COALESCE(s.pin_district, g.address_city))) AS district,
   CASE
     WHEN g.address_zipOrPostcode IS NULL OR TRIM(g.address_zipOrPostcode) = '' THEN 0.0
-    WHEN NOT (TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$') THEN 0.1
-    WHEN p.statename IS NULL THEN 0.3
-    WHEN LOWER(TRIM(p.statename)) <> COALESCE(sa.canonical, LOWER(TRIM(g.address_stateOrRegion))) THEN 0.5
-    WHEN z.zone IS NOT NULL AND NOT ARRAY_CONTAINS(z.states,
-       LOWER(TRIM(COALESCE(p.statename, sa.canonical, g.address_stateOrRegion)))
+    WHEN NOT (s.pin_clean RLIKE '^[0-9]{{6}}$') THEN 0.1
+    WHEN s.pin_state IS NULL THEN 0.3
+    WHEN LOWER(TRIM(s.pin_state)) <> COALESCE(s.alias_state, LOWER(TRIM(g.address_stateOrRegion))) THEN 0.5
+    WHEN s.pin_zone IS NOT NULL AND NOT ARRAY_CONTAINS(s.allowed_states,
+       LOWER(TRIM(COALESCE(s.pin_state, s.alias_state, g.address_stateOrRegion)))
     ) THEN 0.6
     ELSE 1.0
-  END AS pincode_confidence
+  END AS pincode_confidence,
+  -- needs_geo_review = pincode_confidence < 0.8 (computed below in a second pass)
+  (
+    CASE
+      WHEN g.address_zipOrPostcode IS NULL OR TRIM(g.address_zipOrPostcode) = '' THEN 0.0
+      WHEN NOT (s.pin_clean RLIKE '^[0-9]{{6}}$') THEN 0.1
+      WHEN s.pin_state IS NULL THEN 0.3
+      WHEN LOWER(TRIM(s.pin_state)) <> COALESCE(s.alias_state, LOWER(TRIM(g.address_stateOrRegion))) THEN 0.5
+      WHEN s.pin_zone IS NOT NULL AND NOT ARRAY_CONTAINS(s.allowed_states,
+         LOWER(TRIM(COALESCE(s.pin_state, s.alias_state, g.address_stateOrRegion)))
+      ) THEN 0.6
+      ELSE 1.0
+    END
+  ) < 0.8 AS needs_geo_review
 FROM {TARGET}.facilities_gold g
-LEFT JOIN pin_lookup p
-  ON TRY_CAST(TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) AS BIGINT) = p.pincode
-LEFT JOIN state_alias sa
-  ON LOWER(TRIM(g.address_stateOrRegion)) = sa.alias
-LEFT JOIN pincode_zones z
-  ON z.zone = TRY_CAST(SUBSTRING(TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')), 1, 1) AS INT)
+JOIN scored s ON g.unique_id = s.unique_id
 """)
-print(f"facilities_gold (with geo-resolve): {spark.table(f'{TARGET}.facilities_gold').count()} rows")
+# Drop the now-redundant address_zipOrPostcode (replaced by `pincode`)
+spark.sql(f"ALTER TABLE {TARGET}.facilities_gold DROP COLUMN IF EXISTS address_zipOrPostcode")
+print(f"facilities_gold (with clean geo): {spark.table(f'{TARGET}.facilities_gold').count()} rows")
 
 # COMMAND ----------
+
+# Build the geo audit table from the in-progress gold rows. We rerun the
+# pincode validation logic here so the audit table is self-contained
+# (doesn't depend on intermediate columns the clean gold doesn't carry).
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.facility_geo_audit AS
+WITH pin_lookup AS (
+  SELECT pincode, MIN(district) district, MIN(statename) statename
+  FROM {TARGET}.pincode_deduped
+  WHERE LOWER(TRIM(statename)) <> 'na'
+  GROUP BY pincode
+),
+src AS (
+  SELECT
+    unique_id, name,
+    address_zipOrPostcode AS raw_pincode_original,
+    TRIM(REPLACE(address_zipOrPostcode, ' ', '')) AS pin_clean,
+    address_city AS claimed_city,
+    address_stateOrRegion AS claimed_state
+  FROM {TARGET}.facilities_clean
+)
+SELECT
+  s.unique_id,
+  s.name,
+  s.raw_pincode_original,
+  s.pin_clean,
+  (s.pin_clean RLIKE '^[0-9]{{6}}$') AS pincode_valid_format,
+  p.statename  AS pin_state_directory,
+  p.district   AS pin_district_directory,
+  s.claimed_city,
+  s.claimed_state,
+  g.pincode    AS resolved_pincode,
+  g.state      AS resolved_state,
+  g.district   AS resolved_district,
+  g.pincode_confidence,
+  g.needs_geo_review
+FROM src s
+LEFT JOIN pin_lookup p
+  ON TRY_CAST(s.pin_clean AS BIGINT) = p.pincode
+LEFT JOIN {TARGET}.facilities_gold g
+  ON s.unique_id = g.unique_id
+""")
 
 spark.sql(f"""
 CREATE OR REPLACE TABLE {TARGET}.facilities_vs_source AS
 SELECT unique_id, name, facilityTypeId, address_city, address_stateOrRegion,
-  address_zipOrPostcode, state_resolved, district_resolved,
-  pincode_state_mismatch, pincode_status, pincode_confidence,
+  pincode, state, district, pincode_confidence, needs_geo_review,
   latitude, longitude, specialties, capability, description,
   source_types, source_urls, capacity, numberDoctors, yearEstablished,
   base_trust_signal, trust_rank, missing_data_count, distinct_source_count,
