@@ -24,22 +24,51 @@ TARGET = "workspace.referral_copilot"
 
 spark.sql(f"""
 CREATE OR REPLACE TABLE {TARGET}.facilities_clean AS
-SELECT *,
-  CASE WHEN source_types IS NOT NULL
-    THEN SIZE(FROM_JSON(source_types, 'ARRAY<STRING>')) ELSE 0
-  END as source_count,
-  CASE WHEN source_types IS NOT NULL
-    THEN SIZE(ARRAY_DISTINCT(FROM_JSON(source_types, 'ARRAY<STRING>'))) ELSE 0
-  END as distinct_source_count,
-  CASE WHEN specialties IS NOT NULL
-    THEN SIZE(FROM_JSON(specialties, 'ARRAY<STRING>')) ELSE 0
-  END as specialty_count,
-  CASE WHEN capability IS NOT NULL
-    THEN SIZE(FROM_JSON(capability, 'ARRAY<STRING>')) ELSE 0
-  END as capability_count,
-  CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL
-    THEN true ELSE false
-  END as has_coordinates
+SELECT
+  unique_id, name, organization_type, facilityTypeId, operatorTypeId,
+  affiliationTypeIds, content_table_id,
+  address_line1, address_line2, address_line3,
+  address_city, address_stateOrRegion, address_zipOrPostcode,
+  address_country, address_countryCode, countries, area,
+  latitude, longitude, coordinates, cluster_id,
+  -- Clean nullable fields (empty strings -> NULL)
+  NULLIF(NULLIF(NULLIF(phone_numbers, ''), 'null'), 'N/A') as phone_numbers,
+  NULLIF(NULLIF(NULLIF(officialPhone, ''), 'null'), 'N/A') as officialPhone,
+  NULLIF(NULLIF(email, ''), 'null') as email,
+  NULLIF(NULLIF(websites, ''), 'null') as websites,
+  NULLIF(NULLIF(officialWebsite, ''), 'null') as officialWebsite,
+  NULLIF(NULLIF(facebookLink, ''), 'null') as facebookLink,
+  NULLIF(NULLIF(NULLIF(NULLIF(yearEstablished, ''), 'null'), 'Unknown'), 'unknown') as yearEstablished,
+  NULLIF(NULLIF(acceptsVolunteers, ''), 'null') as acceptsVolunteers,
+  description, specialties, capability, procedure, equipment,
+  source_types, source_ids, source_urls, source_content_id, source,
+  NULLIF(NULLIF(NULLIF(NULLIF(numberDoctors, ''), 'null'), '0'), 'unknown') as numberDoctors,
+  NULLIF(NULLIF(NULLIF(NULLIF(capacity, ''), 'null'), '0'), 'unknown') as capacity,
+  recency_of_page_update, distinct_social_media_presence_count,
+  affiliated_staff_presence, custom_logo_presence,
+  number_of_facts_about_the_organization,
+  post_metrics_most_recent_social_media_post_date,
+  post_metrics_post_count, engagement_metrics_n_followers,
+  engagement_metrics_n_likes, engagement_metrics_n_engagements,
+  -- Computed counts
+  CASE WHEN source_types IS NOT NULL AND LENGTH(source_types) > 5
+    THEN SIZE(FROM_JSON(source_types, 'ARRAY<STRING>')) ELSE 0 END as source_count,
+  CASE WHEN source_types IS NOT NULL AND LENGTH(source_types) > 5
+    THEN SIZE(ARRAY_DISTINCT(FROM_JSON(source_types, 'ARRAY<STRING>'))) ELSE 0 END as distinct_source_count,
+  CASE WHEN specialties IS NOT NULL AND LENGTH(specialties) > 5
+    THEN SIZE(FROM_JSON(specialties, 'ARRAY<STRING>')) ELSE 0 END as specialty_count,
+  CASE WHEN capability IS NOT NULL AND LENGTH(capability) > 5
+    THEN SIZE(FROM_JSON(capability, 'ARRAY<STRING>')) ELSE 0 END as capability_count,
+  CASE WHEN procedure IS NOT NULL AND LENGTH(procedure) > 5
+    THEN SIZE(FROM_JSON(procedure, 'ARRAY<STRING>')) ELSE 0 END as procedure_count,
+  CASE WHEN equipment IS NOT NULL AND LENGTH(equipment) > 5
+    THEN SIZE(FROM_JSON(equipment, 'ARRAY<STRING>')) ELSE 0 END as equipment_count,
+  -- Boolean flags
+  (latitude IS NOT NULL AND longitude IS NOT NULL) as has_coordinates,
+  (description IS NOT NULL AND LENGTH(description) > 5) as has_description,
+  (NULLIF(NULLIF(NULLIF(NULLIF(numberDoctors, ''), 'null'), '0'), 'unknown') IS NOT NULL) as has_doctors,
+  (NULLIF(NULLIF(NULLIF(NULLIF(capacity, ''), 'null'), '0'), 'unknown') IS NOT NULL) as has_capacity,
+  (NULLIF(NULLIF(NULLIF(NULLIF(yearEstablished, ''), 'null'), 'Unknown'), 'unknown') IS NOT NULL) as has_year_established
 FROM {BRONZE}.facilities
 """)
 
