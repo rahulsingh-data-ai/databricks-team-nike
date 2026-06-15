@@ -40,8 +40,14 @@ SELECT
   NULLIF(NULLIF(facebookLink, ''), 'null') as facebookLink,
   NULLIF(NULLIF(NULLIF(NULLIF(yearEstablished, ''), 'null'), 'Unknown'), 'unknown') as yearEstablished,
   NULLIF(NULLIF(acceptsVolunteers, ''), 'null') as acceptsVolunteers,
-  description, specialties, capability, procedure, equipment,
-  source_types, source_ids, source_urls, source_content_id, source,
+  description, specialties,
+  -- Array fields: replace literal "null" / "[]" strings with SQL NULL so
+  -- FROM_JSON downstream returns NULL only for genuinely missing data.
+  CASE WHEN LOWER(TRIM(capability))   IN ('null','[]') THEN NULL ELSE capability   END AS capability,
+  CASE WHEN LOWER(TRIM(procedure))    IN ('null','[]') THEN NULL ELSE procedure    END AS procedure,
+  CASE WHEN LOWER(TRIM(equipment))    IN ('null','[]') THEN NULL ELSE equipment    END AS equipment,
+  CASE WHEN LOWER(TRIM(source_types)) IN ('null','[]') THEN NULL ELSE source_types END AS source_types,
+  source_ids, source_urls, source_content_id, source,
   NULLIF(NULLIF(NULLIF(NULLIF(numberDoctors, ''), 'null'), '0'), 'unknown') as numberDoctors,
   NULLIF(NULLIF(NULLIF(NULLIF(capacity, ''), 'null'), '0'), 'unknown') as capacity,
   recency_of_page_update, distinct_social_media_presence_count,
@@ -90,15 +96,27 @@ print(f"facilities_clean: {spark.table(f'{TARGET}.facilities_clean').count()} ro
 
 spark.sql(f"""
 CREATE OR REPLACE TABLE {TARGET}.pincode_deduped AS
+WITH agg AS (
+  SELECT
+    pincode, district, statename,
+    AVG(TRY_CAST(latitude AS DOUBLE)) as latitude,
+    AVG(TRY_CAST(longitude AS DOUBLE)) as longitude,
+    COUNT(*) as office_count,
+    FIRST(regionname) as regionname,
+    FIRST(divisionname) as divisionname
+  FROM {BRONZE}.india_post_pincode_directory
+  GROUP BY pincode, district, statename
+)
 SELECT
   pincode, district, statename,
-  AVG(TRY_CAST(latitude AS DOUBLE)) as latitude,
-  AVG(TRY_CAST(longitude AS DOUBLE)) as longitude,
-  COUNT(*) as office_count,
-  FIRST(regionname) as regionname,
-  FIRST(divisionname) as divisionname
-FROM {BRONZE}.india_post_pincode_directory
-GROUP BY pincode, district, statename
+  -- Drop coordinates that fell outside India's bounding box. The source
+  -- CSV has ~400 pincodes with garbled lat/lon values that skew the AVG.
+  CASE WHEN latitude BETWEEN 6 AND 38 AND longitude BETWEEN 68 AND 98
+       THEN latitude  ELSE NULL END as latitude,
+  CASE WHEN latitude BETWEEN 6 AND 38 AND longitude BETWEEN 68 AND 98
+       THEN longitude ELSE NULL END as longitude,
+  office_count, regionname, divisionname
+FROM agg
 """)
 
 print(f"pincode_deduped: {spark.table(f'{TARGET}.pincode_deduped').count()} rows")
