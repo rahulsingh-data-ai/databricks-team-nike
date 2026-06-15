@@ -130,6 +130,14 @@ TOOLS = [
             "capability": "string | null — capability to compare on",
         },
     },
+    {
+        "name": "build_citations",
+        "description": "Build an explicit claim -> source URL map for a facility. Use this when the user asks 'why should I trust this?' or wants to see the evidence behind a claim.",
+        "parameters": {
+            "facility_id": "string — unique_id of the facility",
+            "capability": "string | null — capability to highlight matching claims",
+        },
+    },
 ]
 
 
@@ -251,6 +259,16 @@ def _tool_compare_facilities(args: dict, db: DatabricksSQLClient) -> dict:
     }
 
 
+def _tool_build_citations(args: dict, db: DatabricksSQLClient) -> dict:
+    from ..scoring.citations import build_citations
+
+    facility = get_facility_by_id(db, args.get("facility_id", ""))
+    if not facility:
+        return {"error": "Facility not found"}
+    capability = args.get("capability")
+    return build_citations(facility, [capability] if capability else [])
+
+
 # ============================================================
 # Tool Registry
 # ============================================================
@@ -268,6 +286,7 @@ TOOL_REGISTRY: dict[str, Callable] = {
     "get_coverage_index": _tool_get_coverage_index,
     "get_capability_gaps": _tool_get_capability_gaps,
     "compare_facilities": _tool_compare_facilities,
+    "build_citations": _tool_build_citations,
 }
 
 

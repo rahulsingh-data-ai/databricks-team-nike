@@ -124,10 +124,17 @@ def search_facilities(
         keyword_conditions.append(f"LOWER(capability) LIKE {pattern}")
         keyword_conditions.append(f"LOWER(procedure) LIKE {pattern}")
 
+    has_terms = bool(specialty_conditions)
     specialty_filter = " OR ".join(specialty_conditions) if specialty_conditions else "TRUE"
     keyword_filter = " OR ".join(keyword_conditions) if keyword_conditions else "FALSE"
 
-    where_parts = [f"(({specialty_filter}) OR ({keyword_filter}))"]
+    where_parts: list[str] = []
+    if has_terms:
+        where_parts.append(f"(({specialty_filter}) OR ({keyword_filter}))")
+    # When no specialty terms are provided we still need geo or admin filters;
+    # otherwise return only facilities with coordinates so the result is meaningful.
+    if not has_terms and not use_geo and not state and not district:
+        return []
 
     if state:
         where_parts.append(
@@ -139,7 +146,7 @@ def search_facilities(
             f"OR LOWER(address_stateOrRegion) LIKE {sql_like(district)})"
         )
 
-    where_clause = " AND ".join(where_parts)
+    where_clause = " AND ".join(where_parts) if where_parts else "TRUE"
     order_by = "distance_km ASC NULLS LAST" if use_geo else "name ASC"
 
     sql = f"""
