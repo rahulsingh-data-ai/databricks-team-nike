@@ -162,7 +162,16 @@ def search_facilities(
         number_of_facts_about_the_organization,
         base_trust_signal, trust_rank, missing_data_count,
         has_doctors, has_capacity, has_year_established,
-        distinct_source_count, search_text,
+        distinct_source_count,
+        mentions_pmjay, mentions_cghs, mentions_esi,
+        mentions_nabh, mentions_jci, mentions_iso,
+        is_24x7, has_ambulance, has_telemedicine, has_blood_bank,
+        mentions_icu, mentions_nicu, mentions_emergency,
+        is_government_mentioned, is_private_mentioned, is_nonprofit_mentioned,
+        offers_charity_care, is_ngo_source,
+        lang_hindi, lang_tamil, lang_telugu, lang_bengali,
+        lang_marathi, lang_gujarati, lang_kannada, lang_malayalam,
+        search_text,
         {distance_col}
     FROM {FACILITIES_GOLD}
     WHERE latitude IS NOT NULL
@@ -197,6 +206,79 @@ def get_district_health(db: DatabricksSQLClient, district_name: str) -> dict | N
     """
     rows = db.execute(sql)
     return rows[0] if rows else None
+
+
+# Per-capability NFHS-5 indicator selection.
+# Picks the columns most relevant for the searched care need.
+_CAPABILITY_INDICATORS: dict[str, list[str]] = {
+    "maternity": [
+        "institutional_birth_5y_pct",
+        "institutional_birth_in_public_facility_5y_pct",
+    ],
+    "pediatric": [
+        "prev_diarrhoea_2wk_child_u5_pct",
+        "children_prev_symptoms_of_acute_respiratory_infection_ari_2_pct",
+    ],
+    "cardiac": [
+        "w15_plus_with_high_bp_sys_gte_140_mmhg_and_or_dia_gte_90_mm_pct",
+        "m15_plus_with_high_bp_sys_gte_140_mmhg_and_or_dia_gte_90_mm_pct",
+    ],
+    "diabetes": [
+        "w15_plus_with_high_or_very_high_gt_140_mg_dl_blood_sugar_or_pct",
+        "m15_plus_with_high_or_very_high_gt_140_mg_dl_blood_sugar_or_pct",
+    ],
+    "dialysis": [
+        "w15_plus_with_high_or_very_high_gt_140_mg_dl_blood_sugar_or_pct",
+        "w15_plus_with_high_bp_sys_gte_140_mmhg_and_or_dia_gte_90_mm_pct",
+    ],
+    "cancer": [
+        "women_age_30_49_years_ever_undergone_a_cervical_screen_pct",
+        "women_age_30_49_years_ever_undergone_a_breast_exam_pct",
+    ],
+    "anaemia": [
+        "all_w15_49_who_are_anaemic_pct",
+        "non_pregnant_w15_49_who_are_anaemic_lt_12_0_g_dl_22_pct",
+    ],
+}
+
+_BASELINE_INDICATORS = [
+    "institutional_birth_5y_pct",
+    "hh_member_covered_health_insurance_pct",
+    "all_w15_49_who_are_anaemic_pct",
+    "households_using_clean_fuel_for_cooking_pct",
+    "hh_use_improved_sanitation_pct",
+]
+
+
+def pick_district_indicators(
+    district_row: dict | None,
+    capability_terms: list[str] | None,
+) -> dict[str, Any]:
+    """Pick the most relevant NFHS-5 indicators for the searched capability.
+
+    Returns a flat dict of {indicator_name: value} plus the baseline metrics
+    we always show (district + state name + sample size).
+    """
+    if not district_row:
+        return {}
+
+    out: dict[str, Any] = {
+        "district": district_row.get("district_name"),
+        "state": district_row.get("state_ut"),
+        "households_surveyed": district_row.get("households_surveyed"),
+    }
+
+    selected: list[str] = list(_BASELINE_INDICATORS)
+    for term in capability_terms or []:
+        key = term.lower()
+        for trigger, cols in _CAPABILITY_INDICATORS.items():
+            if trigger in key:
+                selected.extend(cols)
+
+    for col in dict.fromkeys(selected):
+        if col in district_row:
+            out[col] = district_row[col]
+    return out
 
 
 def get_capabilities_list(db: DatabricksSQLClient) -> list[str]:

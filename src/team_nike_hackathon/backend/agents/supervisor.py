@@ -249,6 +249,7 @@ def _inject_context(
         if "get_district_health" in context:
             args.setdefault("district_health", context["get_district_health"])
         args.setdefault("search_terms", parsed.get("specialty_terms", []))
+        args.setdefault("language", parsed.get("language", "en"))
 
     return args
 

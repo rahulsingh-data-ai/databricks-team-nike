@@ -110,10 +110,12 @@ def parse_query(db: DatabricksSQLClient, raw_query: str) -> dict[str, Any]:
         logger.warning(f"Query parser LLM failed: {e}")
         parsed = None
 
+    language = "en"
     if isinstance(parsed, dict) and parsed.get("capability"):
         capability_text = str(parsed.get("capability", raw_query)).strip()
         location_text = str(parsed.get("location", "") or "").strip()
         urgency = str(parsed.get("urgency", "routine") or "routine").strip().lower()
+        language = str(parsed.get("language", "en") or "en").strip().lower()[:5]
         method = "llm"
     else:
         capability_text, location_text = _keyword_split(raw_query)
@@ -128,6 +130,7 @@ def parse_query(db: DatabricksSQLClient, raw_query: str) -> dict[str, Any]:
         "specialty_terms": specialty_terms,
         "location": location,
         "urgency": urgency,
+        "language": language,
         "reasoning": reasoning,
         "method": method,
     }

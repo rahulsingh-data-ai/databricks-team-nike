@@ -20,6 +20,7 @@ from langgraph.graph import END, StateGraph
 from ..db.databricks_sql import DatabricksSQLClient
 from ..db.facility_queries import (
     get_district_health,
+    pick_district_indicators,
     search_facilities,
 )
 from ..db.vector_search import hybrid_search
@@ -66,6 +67,7 @@ class ReferralState(TypedDict, total=False):
     specialty_terms: list[str]
     location: dict | None
     urgency: str
+    language: str
     candidates: list[dict]
     scored_candidates: list[dict]
     district_health: dict | None
@@ -104,6 +106,7 @@ def parse_query_node(state: ReferralState) -> ReferralState:
         "specialty_terms": parsed.get("specialty_terms", []),
         "location": parsed.get("location"),
         "urgency": parsed.get("urgency", "routine"),
+        "language": parsed.get("language", "en"),
         "agent_trace": trace,
     }
 
@@ -173,11 +176,44 @@ def score_node(state: ReferralState) -> ReferralState:
             ),
             "trust_signal": trust["trust_signal"],
             "trust_rank": trust["trust_rank"],
+            "quality_boost": trust.get("quality_boost", 0),
+            "quality_reasons": trust.get("quality_reasons", []),
             "evidence_summary": trust["evidence_summary"],
             "missing_evidence": trust["missing_evidence"],
             "source_count": trust["source_count"],
             "evidence": evidence,
             "search_method": facility.get("search_method", "keyword"),
+            "attributes": {
+                "accepts_pmjay": bool(facility.get("mentions_pmjay")),
+                "accepts_cghs": bool(facility.get("mentions_cghs")),
+                "accepts_esi": bool(facility.get("mentions_esi")),
+                "nabh_accredited": bool(facility.get("mentions_nabh")),
+                "jci_accredited": bool(facility.get("mentions_jci")),
+                "is_24x7": bool(facility.get("is_24x7")),
+                "has_ambulance": bool(facility.get("has_ambulance")),
+                "has_telemedicine": bool(facility.get("has_telemedicine")),
+                "has_blood_bank": bool(facility.get("has_blood_bank")),
+                "has_icu": bool(facility.get("mentions_icu")),
+                "has_nicu": bool(facility.get("mentions_nicu")),
+                "has_emergency": bool(facility.get("mentions_emergency")),
+                "is_government": bool(facility.get("is_government_mentioned")),
+                "is_private": bool(facility.get("is_private_mentioned")),
+                "is_nonprofit": bool(facility.get("is_nonprofit_mentioned")),
+                "offers_charity_care": bool(facility.get("offers_charity_care")),
+                "is_ngo_source": bool(facility.get("is_ngo_source")),
+                "languages": [
+                    lang for lang, flag in [
+                        ("Hindi", facility.get("lang_hindi")),
+                        ("Tamil", facility.get("lang_tamil")),
+                        ("Telugu", facility.get("lang_telugu")),
+                        ("Bengali", facility.get("lang_bengali")),
+                        ("Marathi", facility.get("lang_marathi")),
+                        ("Gujarati", facility.get("lang_gujarati")),
+                        ("Kannada", facility.get("lang_kannada")),
+                        ("Malayalam", facility.get("lang_malayalam")),
+                    ] if bool(flag)
+                ],
+            },
         })
 
     if scored:
@@ -211,6 +247,7 @@ def score_node(state: ReferralState) -> ReferralState:
     scored.sort(
         key=lambda f: (
             -f["trust_rank"],
+            -(f.get("quality_boost") or 0),
             f["distance_km"] if f["distance_km"] is not None else 99999,
         )
     )
@@ -234,16 +271,9 @@ def enrich_node(state: ReferralState) -> ReferralState:
     if location.get("district"):
         raw = get_district_health(db, location["district"])
         if raw:
-            district_health = {
-                "district": raw.get("district_name"),
-                "state": raw.get("state_ut"),
-                "households_surveyed": raw.get("households_surveyed"),
-                "institutional_birth_pct": raw.get("institutional_birth_5y_pct"),
-                "health_insurance_pct": raw.get(
-                    "hh_member_covered_health_insurance_pct"
-                ),
-                "women_anaemic_pct": raw.get("all_w15_49_who_are_anaemic_pct"),
-            }
+            district_health = pick_district_indicators(
+                raw, state.get("specialty_terms") or []
+            )
 
     trace = state.get("agent_trace") or []
     trace.append({
@@ -264,6 +294,7 @@ def recommend_node(state: ReferralState) -> ReferralState:
         state.get("scored_candidates") or [],
         state.get("district_health"),
         state.get("specialty_terms") or [],
+        language=state.get("language") or "en",
     )
 
     trace = state.get("agent_trace") or []
@@ -339,6 +370,7 @@ def run_referral_pipeline(db: DatabricksSQLClient, query: str) -> dict[str, Any]
             "specialty_terms": result.get("specialty_terms"),
             "location": result.get("location"),
             "urgency": result.get("urgency"),
+            "language": result.get("language", "en"),
         },
         "recommendation_summary": result.get("recommendation", ""),
         "result_count": len(scored),

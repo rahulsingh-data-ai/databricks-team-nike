@@ -234,8 +234,50 @@ WITH deduped AS (
   LEFT JOIN (SELECT DISTINCT unique_id, base_trust_signal, trust_rank, missing_data_count
              FROM {TARGET}.facility_trust_scores) t ON f.unique_id = t.unique_id
   LEFT JOIN {TARGET}.facility_embeddings e ON f.unique_id = e.unique_id
+),
+base AS (SELECT * EXCEPT(rn) FROM deduped WHERE rn = 1),
+enriched AS (
+  SELECT b.*,
+    CONCAT_WS(' ',
+      COALESCE(b.description, ''), COALESCE(b.capability, ''),
+      COALESCE(b.procedure, ''),   COALESCE(b.equipment, '')
+    ) AS evidence_blob,
+    LOWER(COALESCE(b.source_types, '')) AS source_types_lc
+  FROM base b
 )
-SELECT * EXCEPT(rn) FROM deduped WHERE rn = 1
+SELECT *,
+  -- Affordability / insurance signals
+  (LOWER(evidence_blob) RLIKE '\\\\b(pm-?jay|ayushman|pradhan mantri jan arogya)\\\\b') AS mentions_pmjay,
+  (LOWER(evidence_blob) RLIKE '\\\\b(cghs)\\\\b') AS mentions_cghs,
+  (LOWER(evidence_blob) RLIKE '\\\\b(esi|esic)\\\\b') AS mentions_esi,
+  -- Accreditation signals
+  (LOWER(evidence_blob) RLIKE '\\\\bnabh\\\\b') AS mentions_nabh,
+  (LOWER(evidence_blob) RLIKE '\\\\bjci\\\\b') AS mentions_jci,
+  (LOWER(evidence_blob) RLIKE '\\\\biso ?900[0-9]') AS mentions_iso,
+  -- Service signals
+  (LOWER(evidence_blob) RLIKE '24 ?(x|/) ?7|24 hour|round the clock') AS is_24x7,
+  (LOWER(evidence_blob) RLIKE '\\\\b(ambulance)\\\\b') AS has_ambulance,
+  (LOWER(evidence_blob) RLIKE 'tele[- ]?medicine|tele[- ]?consult|teleconsultation|tele[- ]?health|video consult|online consult') AS has_telemedicine,
+  (LOWER(evidence_blob) RLIKE 'blood bank') AS has_blood_bank,
+  (LOWER(evidence_blob) RLIKE '\\\\b(icu|intensive care unit)\\\\b') AS mentions_icu,
+  (LOWER(evidence_blob) RLIKE '\\\\b(nicu|neonatal intensive)\\\\b') AS mentions_nicu,
+  (LOWER(evidence_blob) RLIKE 'emergency') AS mentions_emergency,
+  -- Ownership signals
+  (LOWER(evidence_blob) RLIKE 'government hospital|govt hospital|district hospital|sarkari|aiims|public health centre|primary health centre|\\\\bphc\\\\b|community health centre|\\\\bchc\\\\b') AS is_government_mentioned,
+  (LOWER(evidence_blob) RLIKE 'private (hospital|clinic|nursing home)|corporate hospital') AS is_private_mentioned,
+  (LOWER(evidence_blob) RLIKE 'trust hospital|charitable trust|charity|non[- ]?profit|nonprofit|foundation|missionary|society') OR source_types_lc LIKE '%mongo_ngo%' AS is_nonprofit_mentioned,
+  (LOWER(evidence_blob) RLIKE 'free treatment|no cost|no fee|sliding scale|subsidi[sz]ed|concessional|\\\\bbpl\\\\b|below poverty line') AS offers_charity_care,
+  -- Language signals
+  (LOWER(evidence_blob) RLIKE '\\\\b(hindi)\\\\b') AS lang_hindi,
+  (LOWER(evidence_blob) RLIKE '\\\\b(tamil)\\\\b') AS lang_tamil,
+  (LOWER(evidence_blob) RLIKE '\\\\b(telugu)\\\\b') AS lang_telugu,
+  (LOWER(evidence_blob) RLIKE '\\\\b(bengali|bangla)\\\\b') AS lang_bengali,
+  (LOWER(evidence_blob) RLIKE '\\\\b(marathi)\\\\b') AS lang_marathi,
+  (LOWER(evidence_blob) RLIKE '\\\\b(gujarati)\\\\b') AS lang_gujarati,
+  (LOWER(evidence_blob) RLIKE '\\\\b(kannada)\\\\b') AS lang_kannada,
+  (LOWER(evidence_blob) RLIKE '\\\\b(malayalam)\\\\b') AS lang_malayalam,
+  source_types_lc LIKE '%mongo_ngo%' AS is_ngo_source
+FROM enriched
 """)
 print(f"facilities_gold: {spark.table(f'{TARGET}.facilities_gold').count()} rows")
 
@@ -247,7 +289,10 @@ SELECT unique_id, name, facilityTypeId, address_city, address_stateOrRegion,
   address_zipOrPostcode, latitude, longitude, specialties, capability, description,
   source_types, source_urls, capacity, numberDoctors, yearEstablished,
   base_trust_signal, trust_rank, missing_data_count, distinct_source_count,
-  has_doctors, has_capacity, has_year_established, has_coordinates, search_text
+  has_doctors, has_capacity, has_year_established, has_coordinates,
+  mentions_pmjay, mentions_nabh, is_24x7, has_ambulance, has_telemedicine,
+  is_government_mentioned, is_nonprofit_mentioned, offers_charity_care, mentions_icu,
+  search_text
 FROM {TARGET}.facilities_gold
 """)
 print(f"facilities_vs_source: {spark.table(f'{TARGET}.facilities_vs_source').count()} rows")

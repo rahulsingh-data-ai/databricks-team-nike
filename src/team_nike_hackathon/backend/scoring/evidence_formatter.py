@@ -30,6 +30,39 @@ def format_evidence(facility: dict[str, Any]) -> dict[str, Any]:
     # Truncate long lists for readability
     max_display = 10
 
+    attributes = {
+        "accepts_pmjay": bool(facility.get("mentions_pmjay")),
+        "accepts_cghs": bool(facility.get("mentions_cghs")),
+        "accepts_esi": bool(facility.get("mentions_esi")),
+        "nabh_accredited": bool(facility.get("mentions_nabh")),
+        "jci_accredited": bool(facility.get("mentions_jci")),
+        "iso_certified": bool(facility.get("mentions_iso")),
+        "is_24x7": bool(facility.get("is_24x7")),
+        "has_ambulance": bool(facility.get("has_ambulance")),
+        "has_telemedicine": bool(facility.get("has_telemedicine")),
+        "has_blood_bank": bool(facility.get("has_blood_bank")),
+        "has_icu": bool(facility.get("mentions_icu")),
+        "has_nicu": bool(facility.get("mentions_nicu")),
+        "has_emergency": bool(facility.get("mentions_emergency")),
+        "is_government": bool(facility.get("is_government_mentioned")),
+        "is_private": bool(facility.get("is_private_mentioned")),
+        "is_nonprofit": bool(facility.get("is_nonprofit_mentioned")),
+        "offers_charity_care": bool(facility.get("offers_charity_care")),
+        "is_ngo_source": bool(facility.get("is_ngo_source")),
+        "languages": [
+            lang for lang, flag in [
+                ("Hindi", facility.get("lang_hindi")),
+                ("Tamil", facility.get("lang_tamil")),
+                ("Telugu", facility.get("lang_telugu")),
+                ("Bengali", facility.get("lang_bengali")),
+                ("Marathi", facility.get("lang_marathi")),
+                ("Gujarati", facility.get("lang_gujarati")),
+                ("Kannada", facility.get("lang_kannada")),
+                ("Malayalam", facility.get("lang_malayalam")),
+            ] if bool(flag)
+        ],
+    }
+
     return {
         "specialties": specialties[:max_display],
         "specialties_count": len(specialties),
@@ -39,9 +72,10 @@ def format_evidence(facility: dict[str, Any]) -> dict[str, Any]:
         "procedures_count": len(procedures),
         "equipment": equipment_list[:max_display],
         "equipment_count": len(equipment_list),
-        "source_types": list(set(sources)),
+        "source_types": sorted({s for s in sources if s}),
         "source_urls": source_urls[:5],
         "description": (facility.get("description") or "")[:500],
+        "attributes": attributes,
         "metadata": {
             "facility_type": facility.get("facilityTypeId"),
             "organization_type": facility.get("organization_type"),

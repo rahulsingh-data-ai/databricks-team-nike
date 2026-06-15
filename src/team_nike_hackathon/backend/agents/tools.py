@@ -210,6 +210,7 @@ def _tool_generate_recommendation(args: dict, db: DatabricksSQLClient) -> dict:
         args.get("facilities", []),
         args.get("district_health"),
         args.get("search_terms", []),
+        language=args.get("language", "en"),
     )
 
 

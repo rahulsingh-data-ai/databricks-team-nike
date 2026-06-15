@@ -81,6 +81,63 @@ def _has_conflicting_signals(facility: dict, search_terms: list[str]) -> bool:
     return False
 
 
+def _to_int(value: Any) -> int:
+    try:
+        if value is None:
+            return 0
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    s = str(value).strip().lower()
+    return s in ("true", "1", "yes", "y", "t")
+
+
+def _quality_boosts(facility: dict[str, Any]) -> tuple[int, list[str]]:
+    """Score built-in metadata quality signals from the FDR pipeline.
+
+    These are independent of the facility's own claims, so they push
+    trust up (or down) without the self-promotion bias.
+
+    Returns (boost, reasons).
+    """
+    boost = 0
+    reasons: list[str] = []
+
+    recency = (facility.get("recency_of_page_update") or "").strip().lower()
+    if recency in ("recent", "fresh", "current", "true"):
+        boost += 1
+        reasons.append("recently updated")
+
+    staff = _to_bool(facility.get("affiliated_staff_presence"))
+    if staff:
+        boost += 1
+        reasons.append("affiliated staff listed")
+
+    logo = _to_bool(facility.get("custom_logo_presence"))
+    if logo:
+        boost += 1
+        reasons.append("custom branding")
+
+    social = _to_int(facility.get("distinct_social_media_presence_count"))
+    if social >= 2:
+        boost += 1
+        reasons.append(f"{social} social media channels")
+
+    facts = _to_int(facility.get("number_of_facts_about_the_organization"))
+    if facts >= 10:
+        boost += 1
+        reasons.append(f"{facts} corroborated facts")
+
+    return boost, reasons
+
+
 def score_facility(
     facility: dict[str, Any],
     search_terms: list[str],
@@ -91,6 +148,8 @@ def score_facility(
         trust_signal: TrustSignal enum value
         evidence_summary: human-readable explanation
         missing_evidence: list of what's unknown
+        quality_boost: independent metadata score (0-5)
+        quality_reasons: list of triggered signals
     """
     specialties = facility.get("specialties")
     capability = facility.get("capability")
@@ -100,10 +159,6 @@ def score_facility(
     source_types = facility.get("source_types")
     source_urls = facility.get("source_urls")
     recency = facility.get("recency_of_page_update")
-    social_count = facility.get("distinct_social_media_presence_count")
-    staff_presence = facility.get("affiliated_staff_presence")
-    logo = facility.get("custom_logo_presence")
-    facts_count = facility.get("number_of_facts_about_the_organization")
 
     num_sources = _count_sources(source_types)
     in_specialties = _capability_in_specialties(search_terms, specialties)
@@ -153,6 +208,8 @@ def score_facility(
         signal = TrustSignal.NONE
         summary = _build_none_summary(search_terms)
 
+    boost, boost_reasons = _quality_boosts(facility)
+
     return {
         "trust_signal": signal.value,
         "trust_rank": signal.rank,
@@ -161,6 +218,8 @@ def score_facility(
         "source_count": num_sources,
         "in_specialties": in_specialties,
         "in_freetext": in_freetext,
+        "quality_boost": boost,
+        "quality_reasons": boost_reasons,
     }
 
 
