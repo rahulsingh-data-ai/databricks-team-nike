@@ -29,6 +29,26 @@ class AppConfig(BaseSettings):
     )
     app_name: str = Field(default=app_name)
 
+    # Name of the Databricks Model Serving endpoint that re-ranks search
+    # results with LLM reasoning + evidence. Empty disables agentic mode.
+    matchcare_endpoint: str = Field(default="")
+
+    # Foundation-model endpoint used by the agentic LLM pipeline (query
+    # parser, evidence scorer, recommendation generator). Defaults to the
+    # built-in Llama 3.3 70B that ships pre-deployed in every Databricks
+    # workspace; override to point at a custom fine-tuned endpoint.
+    llm_endpoint: str = Field(default="databricks-meta-llama-3-3-70b-instruct")
+
+    # SQL warehouse used to run search against the Unity Catalog Delta
+    # tables. Empty disables Delta search and falls back to Lakebase.
+    delta_warehouse_id: str = Field(default="")
+
+    # Fully-qualified Delta table that backs facility search. Schema is
+    # the ``facilities_gold`` shape from the referral-copilot pipeline.
+    delta_facilities_table: str = Field(
+        default="workspace.referral_copilot.facilities_gold"
+    )
+
     @property
     def static_assets_path(self) -> Path:
         return Path(str(resources.files(app_slug))).joinpath("__dist__")

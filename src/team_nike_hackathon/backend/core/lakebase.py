@@ -90,6 +90,29 @@ def initialize_models(engine: Engine) -> None:
     logger.info("Database models initialized successfully")
 
 
+def initialize_extensions(engine: Engine) -> None:
+    """Best-effort enable of Postgres extensions used by search.
+
+    We rely on ``pg_trgm`` for typo-tolerant text matching (``similarity``,
+    ``%`` operator). Lakebase typically ships with this extension already
+    available; ``CREATE EXTENSION IF NOT EXISTS`` is a no-op when it's
+    already enabled. We *do not* fail boot if this errors — the search
+    SQL has a hand-written fallback path for the rare case where trigrams
+    aren't available.
+    """
+    try:
+        with Session(engine) as session:
+            session.connection().execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+            session.commit()
+        logger.info("Postgres extension pg_trgm is available")
+    except Exception as exc:
+        logger.warning(
+            "Could not enable pg_trgm extension; search will fall back to "
+            "substring matching only: %s",
+            exc,
+        )
+
+
 # --- Lifespan retry wrapper ---
 
 # Databricks' control-plane API for credential vending occasionally 500s with
@@ -138,6 +161,7 @@ class _LakebaseDependency(LifespanDependency):
         ws = app.state.workspace_client
         engine = await _init_engine_with_retry(ws)
         initialize_models(engine)
+        initialize_extensions(engine)
         app.state.engine = engine
         yield
         engine.dispose()

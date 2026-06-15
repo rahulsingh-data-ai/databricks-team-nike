@@ -3,27 +3,38 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* --- MatchCare brand palette --------------------------------------------- */
+/* Navy (provider trust), coral (patient warmth), teal (provider/clinical).  */
+:root {
+  --brand-navy: #0b2d48;
+  --brand-navy-soft: #14406a;
+  --brand-coral: #e8796b;
+  --brand-coral-soft: #f5b3a8;
+  --brand-teal: #3bbfb0;
+  --brand-subtitle: #7a99b0;
+}
+
 :root {
   color-scheme: light;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --background: #ffffff;
+  --foreground: #0b2d48;
+  --card: #ffffff;
+  --card-foreground: #0b2d48;
+  --popover: #ffffff;
+  --popover-foreground: #0b2d48;
+  --primary: #0b2d48;
+  --primary-foreground: #ffffff;
+  --secondary: #f4f7fa;
+  --secondary-foreground: #0b2d48;
+  --muted: #f4f7fa;
+  --muted-foreground: #7a99b0;
+  --accent: #fdece8;
+  --accent-foreground: #0b2d48;
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: #e3ebf3;
+  --input: #e3ebf3;
+  --ring: #e8796b;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -42,25 +53,25 @@
 
 .dark {
   color-scheme: dark;
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.145 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.145 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: #07192a;
+  --foreground: #f4f7fa;
+  --card: #0b2540;
+  --card-foreground: #f4f7fa;
+  --popover: #0b2540;
+  --popover-foreground: #f4f7fa;
+  --primary: #e8796b;
+  --primary-foreground: #07192a;
+  --secondary: #14406a;
+  --secondary-foreground: #f4f7fa;
+  --muted: #14406a;
+  --muted-foreground: #7a99b0;
+  --accent: #14406a;
+  --accent-foreground: #f4f7fa;
   --destructive: oklch(0.396 0.141 25.723);
   --destructive-foreground: oklch(0.637 0.237 25.331);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --ring: oklch(0.439 0 0);
+  --border: rgba(122, 153, 176, 0.2);
+  --input: rgba(122, 153, 176, 0.2);
+  --ring: #e8796b;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
@@ -77,6 +88,13 @@
 }
 
 @theme inline {
+  --font-sans: "Inter", "Helvetica Neue", system-ui, -apple-system, sans-serif;
+  --color-brand-navy: var(--brand-navy);
+  --color-brand-navy-soft: var(--brand-navy-soft);
+  --color-brand-coral: var(--brand-coral);
+  --color-brand-coral-soft: var(--brand-coral-soft);
+  --color-brand-teal: var(--brand-teal);
+  --color-brand-subtitle: var(--brand-subtitle);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -121,5 +139,33 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01", "ss03";
+    -webkit-font-smoothing: antialiased;
   }
+}
+
+/* Used by the in-flight progress bars on the ranked-list and map
+   header strips. Slides a 33% bar across the parent at constant speed
+   so the user has a clear "we're still working" cue without a
+   determinate progress value. */
+@keyframes indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+/* Subtle text-shadow used by glass surfaces (e.g., the floating Filters
+   pill) so labels stay crisp over busy map tiles. Two-layer shadow
+   works for both navy-on-light (light mode) and white-on-translucent
+   (dark mode) — the bottom-bright + top-dark stack creates a soft
+   raised feel without looking embossed. */
+.glass-text {
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.45),
+    0 1px 6px rgba(15, 23, 42, 0.18);
+}
+.dark .glass-text {
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.12),
+    0 1px 4px rgba(0, 0, 0, 0.55);
 }

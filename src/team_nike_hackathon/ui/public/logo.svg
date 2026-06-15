@@ -1,7 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
-    <rect width="100" height="100" fill="#000000" rx="15" ry="15" />
-    <text x="50%" y="50%" dy=".1em" text-anchor="middle" dominant-baseline="middle" font-size="100" fill="#FFFFFF"
-        font-family="Courier New, monospace">
-        t
-    </text>
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" aria-label="MatchCare logo mark">
+  <rect width="200" height="200" rx="44" fill="#0B2D48"/>
+  <rect width="200" height="200" rx="44" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="2"/>
+  <path d="M100,148 C 78,133 52,114 52,84 C 52,66 66,56 80,56 C 89,56 96,61 100,68 Z" fill="#E8796B"/>
+  <path d="M100,68 C 104,61 111,56 120,56 C 134,56 148,66 148,84 C 148,114 122,133 100,148 Z" fill="#3BBFB0"/>
+  <line x1="100" y1="56" x2="100" y2="148" stroke="#0B2D48" stroke-width="2"/>
+  <polyline
+    points="54,94 67,94 73,76 80,114 88,88 100,88 112,88 120,114 127,76 133,94 146,94"
+    fill="none"
+    stroke="white"
+    stroke-width="2.8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    opacity="0.92"
+  />
+  <circle cx="100" cy="88" r="3.5" fill="white" opacity="0.95"/>
 </svg>

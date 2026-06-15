@@ -129,12 +129,27 @@ def get_db_client(ws: WorkspaceClient) -> WorkspaceClient:
 
 def vend_db_token(ws: WorkspaceClient) -> str:
     """Vend a short-lived OAuth token for the configured Lakebase endpoint."""
-    return ws.postgres.generate_database_credential(endpoint=ENDPOINT_NAME).token
+    cred = ws.postgres.generate_database_credential(endpoint=ENDPOINT_NAME)
+    if not cred.token:
+        raise RuntimeError(
+            f"Lakebase did not return a token for endpoint {ENDPOINT_NAME!r}"
+        )
+    return cred.token
 
 
 def get_endpoint_host(ws: WorkspaceClient) -> str:
     """Return the read/write hostname of the configured Lakebase endpoint."""
-    return ws.postgres.get_endpoint(ENDPOINT_NAME).status.hosts.host
+    endpoint = ws.postgres.get_endpoint(ENDPOINT_NAME)
+    host = (
+        endpoint.status.hosts.host
+        if endpoint.status and endpoint.status.hosts
+        else None
+    )
+    if not host:
+        raise RuntimeError(
+            f"Lakebase endpoint {ENDPOINT_NAME!r} is not yet ready (no host)."
+        )
+    return host
 
 
 def get_postgres_user(ws: WorkspaceClient) -> str:
@@ -144,7 +159,10 @@ def get_postgres_user(ws: WorkspaceClient) -> str:
     application id (for ``SERVICE_PRINCIPAL`` roles) as the role's
     ``postgres_role``, which is what we pass as the Postgres ``user``.
     """
-    return ws.current_user.me().user_name
+    user_name = ws.current_user.me().user_name
+    if not user_name:
+        raise RuntimeError("WorkspaceClient.current_user.me().user_name is empty")
+    return user_name
 
 
 # ---------------------------------------------------------------------------

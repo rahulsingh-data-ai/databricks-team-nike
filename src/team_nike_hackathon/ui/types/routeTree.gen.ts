@@ -9,38 +9,82 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './../routes/__root'
+import { Route as FindRouteImport } from './../routes/find'
+import { Route as FieldworkRouteImport } from './../routes/fieldwork'
 import { Route as IndexRouteImport } from './../routes/index'
+import { Route as ProvidersNewRouteImport } from './../routes/providers.new'
 
+const FindRoute = FindRouteImport.update({
+  id: '/find',
+  path: '/find',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FieldworkRoute = FieldworkRouteImport.update({
+  id: '/fieldwork',
+  path: '/fieldwork',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProvidersNewRoute = ProvidersNewRouteImport.update({
+  id: '/providers/new',
+  path: '/providers/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/fieldwork': typeof FieldworkRoute
+  '/find': typeof FindRoute
+  '/providers/new': typeof ProvidersNewRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/fieldwork': typeof FieldworkRoute
+  '/find': typeof FindRoute
+  '/providers/new': typeof ProvidersNewRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/fieldwork': typeof FieldworkRoute
+  '/find': typeof FindRoute
+  '/providers/new': typeof ProvidersNewRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/fieldwork' | '/find' | '/providers/new'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/fieldwork' | '/find' | '/providers/new'
+  id: '__root__' | '/' | '/fieldwork' | '/find' | '/providers/new'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  FieldworkRoute: typeof FieldworkRoute
+  FindRoute: typeof FindRoute
+  ProvidersNewRoute: typeof ProvidersNewRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/find': {
+      id: '/find'
+      path: '/find'
+      fullPath: '/find'
+      preLoaderRoute: typeof FindRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fieldwork': {
+      id: '/fieldwork'
+      path: '/fieldwork'
+      fullPath: '/fieldwork'
+      preLoaderRoute: typeof FieldworkRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -48,11 +92,21 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/providers/new': {
+      id: '/providers/new'
+      path: '/providers/new'
+      fullPath: '/providers/new'
+      preLoaderRoute: typeof ProvidersNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  FieldworkRoute: FieldworkRoute,
+  FindRoute: FindRoute,
+  ProvidersNewRoute: ProvidersNewRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
