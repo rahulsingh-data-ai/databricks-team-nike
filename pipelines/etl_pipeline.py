@@ -365,6 +365,23 @@ state_alias AS (
     ('kozhikode','kerala'),('malappuram','kerala'),('kollam','kerala')
   ) AS t(alias, canonical)
 )
+pincode_zones AS (
+  -- First-digit -> India Post regional zone -> allowed states.
+  -- Used to flag impossible combos like a Maharashtra pincode (4xxxxx)
+  -- labelled as Tamil Nadu.
+  SELECT * FROM (VALUES
+    (1, ARRAY('delhi','haryana','punjab','himachal pradesh','jammu and kashmir','ladakh','chandigarh')),
+    (2, ARRAY('uttar pradesh','uttarakhand')),
+    (3, ARRAY('rajasthan','gujarat','dadra and nagar haveli','daman and diu')),
+    (4, ARRAY('maharashtra','madhya pradesh','chhattisgarh','goa')),
+    (5, ARRAY('andhra pradesh','karnataka','telangana')),
+    (6, ARRAY('tamil nadu','kerala','puducherry','lakshadweep')),
+    (7, ARRAY('west bengal','odisha','assam','arunachal pradesh','manipur',
+              'meghalaya','mizoram','nagaland','sikkim','tripura',
+              'andaman and nicobar islands')),
+    (8, ARRAY('bihar','jharkhand'))
+  ) AS t(zone, states)
+)
 SELECT
   g.* EXCEPT(address_zipOrPostcode),
   TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) AS pin_raw,
@@ -373,16 +390,39 @@ SELECT
   (TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$') AS pincode_valid_format,
   p.statename AS pin_state,
   p.district AS pin_district,
-  COALESCE(p.statename, sa.canonical, LOWER(TRIM(g.address_stateOrRegion))) AS state_resolved,
-  COALESCE(p.district, LOWER(TRIM(g.address_city))) AS district_resolved,
+  LOWER(TRIM(COALESCE(p.statename, sa.canonical, g.address_stateOrRegion))) AS state_resolved,
+  LOWER(TRIM(COALESCE(p.district, g.address_city)))                          AS district_resolved,
   (p.statename IS NOT NULL
     AND LOWER(TRIM(p.statename)) <> COALESCE(sa.canonical, LOWER(TRIM(g.address_stateOrRegion)))
-  ) AS pincode_state_mismatch
+  ) AS pincode_state_mismatch,
+  -- Single-column status with full validation chain:
+  CASE
+    WHEN g.address_zipOrPostcode IS NULL OR TRIM(g.address_zipOrPostcode) = '' THEN 'missing'
+    WHEN NOT (TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$') THEN 'bad_format'
+    WHEN p.statename IS NULL THEN 'unknown_in_directory'
+    WHEN LOWER(TRIM(p.statename)) <> COALESCE(sa.canonical, LOWER(TRIM(g.address_stateOrRegion))) THEN 'state_mismatch'
+    WHEN z.zone IS NOT NULL AND NOT ARRAY_CONTAINS(z.states,
+       LOWER(TRIM(COALESCE(p.statename, sa.canonical, g.address_stateOrRegion)))
+    ) THEN 'wrong_zone'
+    ELSE 'valid'
+  END AS pincode_status,
+  CASE
+    WHEN g.address_zipOrPostcode IS NULL OR TRIM(g.address_zipOrPostcode) = '' THEN 0.0
+    WHEN NOT (TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$') THEN 0.1
+    WHEN p.statename IS NULL THEN 0.3
+    WHEN LOWER(TRIM(p.statename)) <> COALESCE(sa.canonical, LOWER(TRIM(g.address_stateOrRegion))) THEN 0.5
+    WHEN z.zone IS NOT NULL AND NOT ARRAY_CONTAINS(z.states,
+       LOWER(TRIM(COALESCE(p.statename, sa.canonical, g.address_stateOrRegion)))
+    ) THEN 0.6
+    ELSE 1.0
+  END AS pincode_confidence
 FROM {TARGET}.facilities_gold g
 LEFT JOIN pin_lookup p
   ON TRY_CAST(TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) AS BIGINT) = p.pincode
 LEFT JOIN state_alias sa
   ON LOWER(TRIM(g.address_stateOrRegion)) = sa.alias
+LEFT JOIN pincode_zones z
+  ON z.zone = TRY_CAST(SUBSTRING(TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')), 1, 1) AS INT)
 """)
 print(f"facilities_gold (with geo-resolve): {spark.table(f'{TARGET}.facilities_gold').count()} rows")
 
@@ -391,7 +431,8 @@ print(f"facilities_gold (with geo-resolve): {spark.table(f'{TARGET}.facilities_g
 spark.sql(f"""
 CREATE OR REPLACE TABLE {TARGET}.facilities_vs_source AS
 SELECT unique_id, name, facilityTypeId, address_city, address_stateOrRegion,
-  address_zipOrPostcode, state_resolved, district_resolved, pincode_state_mismatch,
+  address_zipOrPostcode, state_resolved, district_resolved,
+  pincode_state_mismatch, pincode_status, pincode_confidence,
   latitude, longitude, specialties, capability, description,
   source_types, source_urls, capacity, numberDoctors, yearEstablished,
   base_trust_signal, trust_rank, missing_data_count, distinct_source_count,
