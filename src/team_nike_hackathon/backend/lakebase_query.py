@@ -6,16 +6,17 @@ used by the SQLAlchemy engine in ``core/lakebase.py``. The admin SP's
 loaded once per process; both the SQLAlchemy engine and any raw-psycopg
 callers share the same OAuth identity from there.
 
-Mirrors the connection pattern of ``gpsi_apps_hub.backend.lakebase_query`` —
-add domain-specific query helpers below the credential plumbing as the app
-grows.
+This module targets the **Lakebase Autoscaling Postgres** API
+(``WorkspaceClient.postgres``), which uses ``projects → branches → endpoints``
+instead of the older provisioned ``database_instances`` shape. The admin SP
+must have a Postgres role provisioned on the target branch; the role's
+``postgres_role`` value is what we send as the connection username.
 """
 
 from __future__ import annotations
 
 import os
 import threading
-import uuid
 from base64 import b64decode
 
 import psycopg
@@ -25,12 +26,39 @@ from psycopg_pool import ConnectionPool
 from .core._config import logger
 
 # ---------------------------------------------------------------------------
-# Shared Lakebase constants & credential helpers
+# Lakebase Autoscaling Postgres location
 # ---------------------------------------------------------------------------
 
-# Name of the Lakebase database instance to connect to. Create this in the
-# Databricks UI (Compute → Database Instances) before deploying.
-INSTANCE_NAME = "team-nike-hackathon"
+# The Lakebase Autoscaling Postgres project / branch / endpoint to connect to.
+# Provision these in the Databricks UI (Compute → Lakebase) before deploying.
+# The full endpoint resource name is built from these three pieces.
+PROJECT_ID = "dais-hackathon"
+BRANCH_ID = "production"
+ENDPOINT_ID = "primary"
+ENDPOINT_NAME = (
+    f"projects/{PROJECT_ID}/branches/{BRANCH_ID}/endpoints/{ENDPOINT_ID}"
+)
+
+# Postgres database name inside the branch. ``databricks_postgres`` is the
+# built-in default for Lakebase Autoscaling Postgres; change this only if you
+# provisioned a custom database.
+DATABASE_NAME = "databricks_postgres"
+
+# Postgres role (username) used to log into the database. This is the
+# ``postgres_role`` value of the Lakebase role provisioned for the admin SP
+# on ``BRANCH_ID`` — typically the SP's application id. Create the role with::
+#
+#   databricks postgres create-role \\
+#       projects/<project>/branches/<branch> \\
+#       --role-id team-nike-hackathon-admin-sp \\
+#       --json '{"spec": {"identity_type": "SERVICE_PRINCIPAL", ...}}'
+#
+# (or via the Python SDK, see ``ws.postgres.create_role``).
+POSTGRES_ROLE = "2a5b4d83-402c-4227-a472-c500fb69d191"
+
+# ---------------------------------------------------------------------------
+# Secret scope (admin-SP OAuth credentials)
+# ---------------------------------------------------------------------------
 
 # Name of the Databricks secret scope that holds the admin-SP credentials.
 # The scope must contain two keys:
@@ -51,15 +79,6 @@ SP_CLIENT_SECRET_KEY = "sp-client-secret"
 def is_dev_mode() -> bool:
     """True when running under the apx local dev server."""
     return os.environ.get("APX_DEV_DB_PORT") is not None
-
-
-def get_database_name() -> str:
-    """Lakebase database name to connect to.
-
-    Defaults to Lakebase's built-in ``databricks_postgres`` database. Change
-    this if you provision a custom database inside the instance.
-    """
-    return "databricks_postgres"
 
 
 def _decode_secret(ws: WorkspaceClient, scope: str, key: str) -> str:
@@ -86,7 +105,9 @@ def get_lakebase_ws(ws: WorkspaceClient) -> WorkspaceClient:
     Credentials are read once from ``SECRET_SCOPE`` and cached for the lifetime
     of the process. The passed-in ``ws`` is only used to read the secrets — the
     returned client is a separate identity, owned by the SP whose creds live
-    in the scope.
+    in the scope. ``auth_type='oauth-m2m'`` is set explicitly so the SDK does
+    not silently fall back to ambient credentials (the deployed app's own SP
+    env vars, the user's ``databricks-cli`` profile, etc.).
     """
     global _lakebase_ws
     if _lakebase_ws is not None:
@@ -98,9 +119,24 @@ def get_lakebase_ws(ws: WorkspaceClient) -> WorkspaceClient:
             host=ws.config.host,
             client_id=_decode_secret(ws, SECRET_SCOPE, SP_CLIENT_ID_KEY),
             client_secret=_decode_secret(ws, SECRET_SCOPE, SP_CLIENT_SECRET_KEY),
+            auth_type="oauth-m2m",
         )
         logger.info("Lakebase admin-SP WorkspaceClient initialised")
         return _lakebase_ws
+
+
+def vend_db_token(ws: WorkspaceClient) -> str:
+    """Vend a short-lived OAuth token for the configured Lakebase endpoint.
+
+    The returned token is what Postgres expects as the connection password
+    (the SDK handles the round-trip with the Lakebase control plane).
+    """
+    return ws.postgres.generate_database_credential(endpoint=ENDPOINT_NAME).token
+
+
+def get_endpoint_host(ws: WorkspaceClient) -> str:
+    """Return the read/write hostname of the configured Lakebase endpoint."""
+    return ws.postgres.get_endpoint(ENDPOINT_NAME).status.hosts.host
 
 
 # ---------------------------------------------------------------------------
@@ -114,34 +150,27 @@ _pool_lock = threading.Lock()
 def _build_pool(ws: WorkspaceClient) -> ConnectionPool:
     """Build a psycopg ``ConnectionPool`` with rotating OAuth tokens."""
     db_ws = get_lakebase_ws(ws)
-    database_name = get_database_name()
-    host = db_ws.database.get_database_instance(name=INSTANCE_NAME).read_write_dns
+    host = get_endpoint_host(db_ws)
 
     class _RotatingTokenConnection(psycopg.Connection):
         @classmethod
         def connect(cls, conninfo: str = "", **kwargs):
-            kwargs["password"] = db_ws.database.generate_database_credential(
-                request_id=str(uuid.uuid4()),
-                instance_names=[kwargs.pop("_instance_name")],
-            ).token
+            kwargs["password"] = vend_db_token(db_ws)
             kwargs.setdefault("sslmode", "require")
             return super().connect(conninfo, **kwargs)
 
-    username = db_ws.current_user.me().user_name
-
     pool = ConnectionPool(
-        conninfo=f"host={host} dbname={database_name} user={username}",
+        conninfo=f"host={host} dbname={DATABASE_NAME} user={POSTGRES_ROLE}",
         connection_class=_RotatingTokenConnection,
-        kwargs={"_instance_name": INSTANCE_NAME},
         min_size=1,
         max_size=8,
         open=True,
     )
 
     logger.info(
-        "Lakebase pool created (instance=%s, database=%s)",
-        INSTANCE_NAME,
-        database_name,
+        "Lakebase pool created (endpoint=%s, database=%s)",
+        ENDPOINT_NAME,
+        DATABASE_NAME,
     )
     return pool  # ty: ignore[invalid-return-type]
 

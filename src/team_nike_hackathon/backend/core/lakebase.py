@@ -1,18 +1,17 @@
 """Lakebase SQLAlchemy engine, session dependency, and table initialisation.
 
-Mirrors ``gpsi_apps_hub.backend.core.lakebase``: in production the SQLAlchemy
-engine connects to the Databricks Database instance via an admin service
-principal whose credentials live in a Databricks secret scope. In local
-development (``apx dev start``) the engine connects to the local Postgres
-that apx vends via ``APX_DEV_DB_PORT`` so the app boots without needing a
-real Lakebase instance or secret scope wired up.
+In production the SQLAlchemy engine connects to a Lakebase Autoscaling
+Postgres endpoint (``WorkspaceClient.postgres``) via an admin service
+principal whose OAuth credentials live in a Databricks secret scope. In
+local development (``apx dev start``) the engine connects to the local
+Postgres that apx vends via ``APX_DEV_DB_PORT`` so the app boots without
+needing a real Lakebase endpoint or secret scope wired up.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import uuid
 from collections.abc import Generator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncGenerator, TypeAlias
@@ -24,10 +23,13 @@ from sqlalchemy import Engine, create_engine, event
 from sqlmodel import Session, SQLModel, text
 
 from ..lakebase_query import (
-    INSTANCE_NAME,
-    get_database_name,
+    DATABASE_NAME,
+    ENDPOINT_NAME,
+    POSTGRES_ROLE,
+    get_endpoint_host,
     get_lakebase_ws,
     is_dev_mode,
+    vend_db_token,
 )
 from ._base import LifespanDependency
 from ._config import logger
@@ -55,23 +57,18 @@ def create_db_engine(ws: WorkspaceClient) -> Engine:
     """Create a SQLAlchemy engine.
 
     Local dev: connects to the apx-vended Postgres on ``APX_DEV_DB_PORT`` —
-    no SSL, no password callback. Production: connects to the Databricks
-    Database ``INSTANCE_NAME`` using the admin-SP ``WorkspaceClient`` from
-    :func:`get_lakebase_ws`, with a per-connection token refresh.
+    no SSL, no password callback. Production: connects to the Lakebase
+    Autoscaling Postgres ``ENDPOINT_NAME`` using the admin-SP
+    ``WorkspaceClient`` from :func:`get_lakebase_ws`, with a per-connection
+    OAuth token refresh.
     """
     if is_dev_mode():
         return create_engine(_build_dev_engine_url(), pool_size=4, pool_recycle=45 * 60)
 
     db_ws = get_lakebase_ws(ws)
-    database_name = get_database_name()
-    host = db_ws.database.get_database_instance(name=INSTANCE_NAME).read_write_dns
-    username = (
-        db_ws.config.client_id
-        if db_ws.config.client_id
-        else db_ws.current_user.me().user_name
-    )
+    host = get_endpoint_host(db_ws)
 
-    engine_url = f"postgresql+psycopg://{username}:@{host}:5432/{database_name}"
+    engine_url = f"postgresql+psycopg://{POSTGRES_ROLE}:@{host}:5432/{DATABASE_NAME}"
     engine_kwargs: dict[str, Any] = {
         "connect_args": {"sslmode": "require"},
         "pool_size": 8,
@@ -81,17 +78,14 @@ def create_db_engine(ws: WorkspaceClient) -> Engine:
     engine = create_engine(engine_url, **engine_kwargs)
 
     def _refresh_token(dialect, conn_rec, cargs, cparams):
-        cparams["password"] = db_ws.database.generate_database_credential(
-            request_id=str(uuid.uuid4()),
-            instance_names=[INSTANCE_NAME],
-        ).token
+        cparams["password"] = vend_db_token(db_ws)
 
     event.listens_for(engine, "do_connect")(_refresh_token)
 
     logger.info(
-        "SQLAlchemy engine created (instance=%s, database=%s)",
-        INSTANCE_NAME,
-        database_name,
+        "SQLAlchemy engine created (endpoint=%s, database=%s)",
+        ENDPOINT_NAME,
+        DATABASE_NAME,
     )
     return engine
 
@@ -101,9 +95,7 @@ def validate_db(engine: Engine) -> None:
     if is_dev_mode():
         logger.info("Validating local dev database connection")
     else:
-        logger.info(
-            "Validating database connection to instance %s", INSTANCE_NAME
-        )
+        logger.info("Validating database connection to endpoint %s", ENDPOINT_NAME)
 
     try:
         with Session(engine) as session:
