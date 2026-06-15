@@ -11,7 +11,7 @@ import time
 import logging
 from typing import Any, Callable
 
-from ..db.databricks_sql import DatabricksSQLClient
+from ..db.databricks_sql import DatabricksSQLClient, _fqn
 from ..db.facility_queries import (
     resolve_location, search_facilities, get_facility_by_id,
     get_district_health, get_capabilities_list, get_desert_scores,
@@ -98,6 +98,32 @@ TOOLS = [
             "query": "string — original user query",
             "facilities": "list[dict] — scored facility results",
             "district_health": "dict | null — NFHS-5 district context",
+        },
+    },
+    {
+        "name": "get_coverage_index",
+        "description": "Get the Hospital Coverage Index for districts — trusted facilities per household surveyed. Shows which districts have the worst coverage.",
+        "parameters": {
+            "district_name": "string | null — specific district, or null for worst districts",
+            "limit": "int — max results (default 20)",
+        },
+    },
+    {
+        "name": "get_capability_gaps",
+        "description": "Find which medical specialties are missing in a district. Shows gaps like 'no nephrology in Bahraich district'.",
+        "parameters": {
+            "district_name": "string | null — district to check",
+            "specialty": "string | null — specific specialty to check across districts",
+            "limit": "int — max results (default 50)",
+        },
+    },
+    {
+        "name": "compare_facilities",
+        "description": "Compare two facilities side-by-side with evidence diff, showing what each has that the other doesn't.",
+        "parameters": {
+            "facility_a": "string — unique_id of first facility",
+            "facility_b": "string — unique_id of second facility",
+            "capability": "string | null — capability to compare on",
         },
     },
 ]
@@ -188,6 +214,45 @@ def _tool_generate_recommendation(args: dict, db: DatabricksSQLClient) -> dict:
     )
 
 
+def _tool_get_coverage_index(args: dict, db: DatabricksSQLClient) -> list[dict]:
+    from .tools import _fqn
+    table = _fqn("district_coverage_index")
+    district = args.get("district_name")
+    limit = args.get("limit", 20)
+    if district:
+        clean = district.strip().replace("'", "''").lower()
+        return db.execute(f"SELECT * FROM {table} WHERE district_name = '{clean}' LIMIT 1")
+    return db.execute(f"SELECT * FROM {table} ORDER BY coverage_index ASC LIMIT {limit}")
+
+
+def _tool_get_capability_gaps(args: dict, db: DatabricksSQLClient) -> list[dict]:
+    from .tools import _fqn
+    table = _fqn("district_capability_gaps")
+    parts = []
+    if args.get("district_name"):
+        parts.append(f"district_name = '{args['district_name'].strip().lower()}'")
+    if args.get("specialty"):
+        parts.append(f"specialty = '{args['specialty'].strip().lower()}'")
+    where = "WHERE " + " AND ".join(parts) if parts else ""
+    limit = args.get("limit", 50)
+    return db.execute(f"SELECT * FROM {table} {where} ORDER BY gap_status LIMIT {limit}")
+
+
+def _tool_compare_facilities(args: dict, db: DatabricksSQLClient) -> dict:
+    a = get_facility_by_id(db, args.get("facility_a", ""))
+    b = get_facility_by_id(db, args.get("facility_b", ""))
+    if not a or not b:
+        return {"error": "One or both facilities not found"}
+    cap = args.get("capability")
+    terms = [cap] if cap else []
+    score_a = score_facility(a, terms)
+    score_b = score_facility(b, terms)
+    return {
+        "facility_a": {"name": a.get("name"), "trust": score_a},
+        "facility_b": {"name": b.get("name"), "trust": score_b},
+    }
+
+
 # ============================================================
 # Tool Registry
 # ============================================================
@@ -202,6 +267,9 @@ TOOL_REGISTRY: dict[str, Callable] = {
     "get_district_health": _tool_get_district_health,
     "get_desert_scores": _tool_get_desert_scores,
     "generate_recommendation": _tool_generate_recommendation,
+    "get_coverage_index": _tool_get_coverage_index,
+    "get_capability_gaps": _tool_get_capability_gaps,
+    "compare_facilities": _tool_compare_facilities,
 }
 
 

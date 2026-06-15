@@ -8,6 +8,9 @@ from .routes.capabilities import router as capabilities_router
 from .routes.desert import router as desert_router
 from .routes.shortlist import router as shortlist_router
 from .routes.health import router as health_router
+from .routes.coverage import router as coverage_router
+from .routes.compare import router as compare_router
+from .routes.stream import router as stream_router
 
 router = create_router()
 
@@ -17,6 +20,9 @@ router.include_router(capabilities_router)
 router.include_router(desert_router)
 router.include_router(shortlist_router)
 router.include_router(health_router)
+router.include_router(coverage_router)
+router.include_router(compare_router)
+router.include_router(stream_router)
 
 
 @router.get("/version", response_model=VersionOut, operation_id="version")
