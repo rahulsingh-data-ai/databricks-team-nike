@@ -90,6 +90,16 @@ WHERE
   AND longitude BETWEEN 68 AND 98
 """)
 
+# Scrub NULL bytes (0x00) from text columns so the Lakebase sync doesn't
+# fail with 'invalid byte sequence for encoding "UTF8": 0x00'.
+# Postgres rejects NULL bytes in TEXT columns; Delta accepts them silently.
+for col in ("name", "description", "capability", "procedure", "equipment"):
+    spark.sql(f"""
+        UPDATE {TARGET}.facilities_clean
+        SET {col} = REPLACE({col}, CHAR(0), '')
+        WHERE CONTAINS({col}, CHAR(0))
+    """)
+
 print(f"facilities_clean: {spark.table(f'{TARGET}.facilities_clean').count()} rows")
 
 # COMMAND ----------
