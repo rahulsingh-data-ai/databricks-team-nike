@@ -8,17 +8,15 @@ available), and the list of supervisor tools.
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
-from sqlmodel import select
 
 from ..agents.tools import TOOLS
-from ..core.dependencies import Dependencies
 from ..db import DatabricksSQLDependency
 from ..db.databricks_sql import _fqn
-from .shortlist import SearchHistoryItem
 
 router = APIRouter(tags=["admin"])
 
 FACILITIES_GOLD = _fqn("facilities_gold")
+SEARCH_HISTORY = _fqn("search_history")
 
 
 @router.get("/admin/telemetry")
@@ -45,13 +43,12 @@ async def telemetry(db: DatabricksSQLDependency):
 
 @router.get("/admin/recent-searches")
 async def recent_searches(
-    session: Dependencies.Session,
+    db: DatabricksSQLDependency,
     limit: int = Query(default=20, ge=1, le=200),
 ):
-    """Most recent searches across all users (Lakebase)."""
-    rows = session.exec(
-        select(SearchHistoryItem)
-        .order_by(SearchHistoryItem.created_at.desc())
-        .limit(limit)
-    ).all()
-    return {"items": [r.model_dump() for r in rows], "count": len(rows)}
+    """Most recent searches across all users (Delta search_history table)."""
+    rows = db.execute(
+        f"SELECT * FROM {SEARCH_HISTORY} "
+        f"ORDER BY created_at DESC LIMIT {limit}"
+    )
+    return {"items": rows, "count": len(rows)}

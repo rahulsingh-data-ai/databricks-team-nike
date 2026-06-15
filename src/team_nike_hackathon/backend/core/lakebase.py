@@ -147,20 +147,42 @@ def initialize_models(engine: Engine) -> None:
 class _LakebaseDependency(LifespanDependency):
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
-        db_config = DatabaseConfig()  # ty: ignore[missing-argument]
-        ws = app.state.workspace_client
+        # If PGAPPNAME isn't set (local dev without Lakebase), skip the
+        # whole Lakebase setup gracefully. Persistence routes will then
+        # return 503 instead of crashing the whole app.
+        if not os.environ.get("PGAPPNAME"):
+            logger.warning(
+                "Lakebase: PGAPPNAME not set; skipping engine setup. "
+                "Persistence routes will return 503 until Lakebase is deployed."
+            )
+            app.state.engine = None
+            yield
+            return
 
-        engine = create_db_engine(db_config, ws)
-        validate_db(engine, db_config)
-        initialize_models(engine)
-
-        app.state.engine = engine
-        yield
-        engine.dispose()
+        try:
+            db_config = DatabaseConfig()  # ty: ignore[missing-argument]
+            ws = app.state.workspace_client
+            engine = create_db_engine(db_config, ws)
+            validate_db(engine, db_config)
+            initialize_models(engine)
+            app.state.engine = engine
+            yield
+            engine.dispose()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Lakebase setup failed; persistence will be disabled: {e}")
+            app.state.engine = None
+            yield
 
     @staticmethod
     def __call__(request: Request) -> Generator[Session, None, None]:
-        with Session(bind=request.app.state.engine) as session:
+        engine = getattr(request.app.state, "engine", None)
+        if engine is None:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=503,
+                detail="Lakebase is not configured. Persistence is unavailable.",
+            )
+        with Session(bind=engine) as session:
             yield session
 
 
