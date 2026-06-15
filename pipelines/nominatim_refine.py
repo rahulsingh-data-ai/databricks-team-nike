@@ -171,21 +171,23 @@ print(json.dumps(summary, indent=2, default=str))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Merge into facilities_gold
-# MAGIC Add a ``nominatim_pincode`` column for the UI to display Nominatim's
-# MAGIC opinion as a "secondary source" next to the India Post snap.
+# MAGIC ## 5. (Optional) Boost pincode_confidence in facilities_gold
+# MAGIC We deliberately do NOT pollute facilities_gold with separate
+# MAGIC ``nominatim_*`` columns. The detailed Nominatim data lives in the
+# MAGIC audit table ``facility_pincode_nominatim``. Here we only nudge the
+# MAGIC trust signal: when Nominatim agrees with our India Post snap,
+# MAGIC bump ``pincode_confidence`` toward 1.0.
 
 # COMMAND ----------
 
 spark.sql(f"""
-    CREATE OR REPLACE TABLE {TARGET}.facilities_gold AS
-    SELECT g.*,
-           n.nom_pincode      AS nominatim_pincode,
-           n.nom_city         AS nominatim_city,
-           n.nom_state        AS nominatim_state,
-           n.agrees_with_post AS nominatim_agrees_with_post
-    FROM {TARGET}.facilities_gold g
-    LEFT JOIN {TARGET}.facility_pincode_nominatim n
-      ON g.unique_id = n.unique_id
+    MERGE INTO {TARGET}.facilities_gold g
+    USING (
+        SELECT unique_id, agrees_with_post
+        FROM {TARGET}.facility_pincode_nominatim
+        WHERE agrees_with_post = true
+    ) n
+    ON g.unique_id = n.unique_id
+    WHEN MATCHED THEN UPDATE SET g.pincode_confidence = GREATEST(g.pincode_confidence, 0.95)
 """)
-print(f"facilities_gold rows: {spark.table(f'{TARGET}.facilities_gold').count()}")
+print("Pincode confidence boosted for facilities where Nominatim agrees")
