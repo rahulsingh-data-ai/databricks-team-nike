@@ -12,6 +12,7 @@ from .routes.facility import router as facility_router
 from .routes.health import router as health_router
 from .routes.search import router as search_router
 from .routes.shortlist import router as shortlist_router
+from .routes.sms import router as sms_router
 from .routes.stream import router as stream_router
 
 router = create_router()
@@ -26,6 +27,7 @@ router.include_router(health_router)
 router.include_router(coverage_router)
 router.include_router(compare_router)
 router.include_router(stream_router)
+router.include_router(sms_router)
 router.include_router(admin_router)
 
 
