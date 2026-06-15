@@ -2,36 +2,35 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-from fastapi import APIRouter
+import asyncio
 
-from ..db import DatabricksSQLDependency
+from fastapi import APIRouter
+from pydantic import BaseModel, Field
+
 from ..agents.graph import run_referral_pipeline
 from ..agents.supervisor import run_supervisor
+from ..db import DatabricksSQLDependency
 
 router = APIRouter(tags=["search"])
 
 
 class SearchRequest(BaseModel):
-    query: str
-    limit: int = 20
-    mode: str = "graph"
+    query: str = Field(..., min_length=1, max_length=500)
+    limit: int = Field(default=20, ge=1, le=200)
+    mode: str = Field(default="graph", pattern="^(graph|supervisor)$")
 
 
 @router.post("/search")
 async def search(body: SearchRequest, db: DatabricksSQLDependency):
     """Run the referral search pipeline.
 
-    Accepts a natural language query like 'dialysis near Jaipur'
-    and returns ranked, trust-scored facility results.
-
     Modes:
-        - "graph": LangGraph 5-agent pipeline (default)
-        - "supervisor": Supervisor agent with dynamic tool selection
+        - ``graph`` (default): LangGraph 5-node pipeline
+        - ``supervisor``: LLM-driven dynamic tool-calling agent
     """
     if body.mode == "supervisor":
         return await run_supervisor(body.query, db)
-    return run_referral_pipeline(db, body.query)
+    return await asyncio.to_thread(run_referral_pipeline, db, body.query)
 
 
 @router.post("/agent/command")

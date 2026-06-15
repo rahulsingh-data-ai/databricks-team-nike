@@ -27,6 +27,27 @@ def _fqn(table: str) -> str:
     return f"{SILVER_GOLD_CATALOG}.{SILVER_GOLD_SCHEMA}.{table}"
 
 
+def sql_str(value: Any) -> str:
+    """Render a Python value as a safe SQL string literal.
+
+    Returns ``NULL`` for ``None``. Escapes single quotes by doubling them
+    and strips backslashes/null bytes to keep generated SQL well-formed
+    even when the input came from an LLM.
+    """
+    if value is None:
+        return "NULL"
+    text = str(value).replace("\\", "").replace("\x00", "")
+    return "'" + text.replace("'", "''") + "'"
+
+
+def sql_like(value: Any) -> str:
+    """Render a Python value as a SQL LIKE pattern (lowercased)."""
+    if value is None:
+        return "''"
+    text = str(value).lower().replace("\\", "").replace("\x00", "")
+    return "'%" + text.replace("'", "''") + "%'"
+
+
 class DatabricksSQLClient:
     """Thin wrapper around databricks-sql-connector for query execution."""
 

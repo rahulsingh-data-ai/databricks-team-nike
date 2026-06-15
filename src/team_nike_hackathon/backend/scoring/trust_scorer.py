@@ -165,9 +165,9 @@ def score_facility(
 
 
 def _build_strong_summary(facility: dict, terms: list[str], source_count: int) -> str:
-    name = facility.get("name", "This facility")
     sources = _parse_json_array(facility.get("source_types"))
-    source_list = ", ".join(set(sources)[:3]) if sources else "multiple sources"
+    unique_sources = sorted(set(sources))[:3]
+    source_list = ", ".join(unique_sources) if unique_sources else "multiple sources"
     return (
         f"Confirmed by {source_count} independent sources ({source_list}). "
         f"Capability appears in structured specialties data."

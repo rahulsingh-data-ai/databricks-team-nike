@@ -14,10 +14,10 @@ router = APIRouter(tags=["compare"])
 
 @router.get("/compare")
 async def compare_facilities(
+    db: DatabricksSQLDependency,
     facility_a: str,
     facility_b: str,
     capability: str | None = None,
-    db: DatabricksSQLDependency = None,
 ):
     """Compare two facilities side-by-side with evidence diff.
 

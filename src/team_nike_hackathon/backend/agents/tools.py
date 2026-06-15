@@ -11,15 +11,18 @@ import time
 import logging
 from typing import Any, Callable
 
-from ..db.databricks_sql import DatabricksSQLClient, _fqn
+from ..db.databricks_sql import DatabricksSQLClient, _fqn, sql_str
 from ..db.facility_queries import (
     resolve_location, search_facilities, get_facility_by_id,
     get_district_health, get_capabilities_list, get_desert_scores,
-    map_query_to_specialties,
 )
 from ..db.vector_search import vector_search
 from ..scoring.trust_scorer import score_facility
 from ..scoring.evidence_formatter import format_evidence
+
+COVERAGE_TABLE = _fqn("district_coverage_index")
+GAPS_TABLE = _fqn("district_capability_gaps")
+ALLOWED_GAP_STATUS = {"missing", "critical", "low", "available"}
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +62,8 @@ TOOLS = [
         "description": "Semantic search across facility descriptions using embeddings. Finds facilities even if exact keywords don't match.",
         "parameters": {
             "query_text": "string — natural language search query",
-            "num_results": "int — max results (default 20)",
+            "num_results": "int — max results (default 20, max 200)",
+            "filters": "dict | null — optional column filters, e.g. {\"address_stateOrRegion\": \"Rajasthan\"}",
         },
     },
     {
@@ -134,27 +138,10 @@ TOOLS = [
 # ============================================================
 
 def _tool_parse_query(args: dict, db: DatabricksSQLClient) -> dict:
-    """Parse query into capability + location."""
-    query = args.get("query", "")
-    specialty_terms = map_query_to_specialties(query)
+    """Parse query into capability + location using the shared parser."""
+    from .query_parser import parse_query
 
-    # Extract location from query
-    import re
-    location_text = ""
-    for prep in ["near", "in", "around", "close to", "at"]:
-        match = re.search(rf"\b{prep}\b", query, re.IGNORECASE)
-        if match:
-            location_text = query[match.end():].strip()
-            break
-
-    location = resolve_location(db, location_text) if location_text else None
-
-    return {
-        "capability_text": query,
-        "location_text": location_text,
-        "specialty_terms": specialty_terms,
-        "location": location,
-    }
+    return parse_query(db, args.get("query", ""))
 
 
 def _tool_resolve_location(args: dict, db: DatabricksSQLClient) -> dict:
@@ -176,9 +163,13 @@ def _tool_search_facilities(args: dict, db: DatabricksSQLClient) -> list[dict]:
 
 
 def _tool_vector_search(args: dict, db: DatabricksSQLClient) -> list[dict]:
+    filters = args.get("filters")
+    if filters is not None and not isinstance(filters, dict):
+        filters = None
     return vector_search(
         args.get("query_text", ""),
         num_results=args.get("num_results", 20),
+        filters=filters,
     )
 
 
@@ -215,27 +206,34 @@ def _tool_generate_recommendation(args: dict, db: DatabricksSQLClient) -> dict:
 
 
 def _tool_get_coverage_index(args: dict, db: DatabricksSQLClient) -> list[dict]:
-    from .tools import _fqn
-    table = _fqn("district_coverage_index")
     district = args.get("district_name")
-    limit = args.get("limit", 20)
+    limit = max(1, min(int(args.get("limit") or 20), 200))
     if district:
-        clean = district.strip().replace("'", "''").lower()
-        return db.execute(f"SELECT * FROM {table} WHERE district_name = '{clean}' LIMIT 1")
-    return db.execute(f"SELECT * FROM {table} ORDER BY coverage_index ASC LIMIT {limit}")
+        return db.execute(
+            f"SELECT * FROM {COVERAGE_TABLE} "
+            f"WHERE district_name = {sql_str(district.strip().lower())} "
+            f"LIMIT 1"
+        )
+    return db.execute(
+        f"SELECT * FROM {COVERAGE_TABLE} ORDER BY coverage_index ASC LIMIT {limit}"
+    )
 
 
 def _tool_get_capability_gaps(args: dict, db: DatabricksSQLClient) -> list[dict]:
-    from .tools import _fqn
-    table = _fqn("district_capability_gaps")
-    parts = []
+    parts: list[str] = []
     if args.get("district_name"):
-        parts.append(f"district_name = '{args['district_name'].strip().lower()}'")
+        parts.append(
+            f"district_name = {sql_str(args['district_name'].strip().lower())}"
+        )
     if args.get("specialty"):
-        parts.append(f"specialty = '{args['specialty'].strip().lower()}'")
+        parts.append(
+            f"specialty = {sql_str(args['specialty'].strip().lower())}"
+        )
     where = "WHERE " + " AND ".join(parts) if parts else ""
-    limit = args.get("limit", 50)
-    return db.execute(f"SELECT * FROM {table} {where} ORDER BY gap_status LIMIT {limit}")
+    limit = max(1, min(int(args.get("limit") or 50), 200))
+    return db.execute(
+        f"SELECT * FROM {GAPS_TABLE} {where} ORDER BY gap_status LIMIT {limit}"
+    )
 
 
 def _tool_compare_facilities(args: dict, db: DatabricksSQLClient) -> dict:

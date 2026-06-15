@@ -6,7 +6,7 @@ import json
 import math
 from typing import Any
 
-from .databricks_sql import DatabricksSQLClient, _fqn, _bronze
+from .databricks_sql import DatabricksSQLClient, _fqn, _bronze, sql_str, sql_like
 
 # Gold table (single source of truth — all columns + trust + search_text)
 FACILITIES_GOLD = _fqn("facilities_gold")
@@ -58,7 +58,9 @@ def resolve_location(db: DatabricksSQLClient, query: str) -> dict[str, Any] | No
 
     Uses the deduped pincode table (already has avg lat/lon per pincode).
     """
-    clean = query.strip().replace("'", "''")
+    if not query or not query.strip():
+        return None
+    needle = sql_str(query.strip().lower())
 
     sql = f"""
     SELECT
@@ -69,9 +71,9 @@ def resolve_location(db: DatabricksSQLClient, query: str) -> dict[str, Any] | No
         MIN(pincode) as pincode,
         COUNT(*) as match_count
     FROM {PINCODE}
-    WHERE LOWER(district) = LOWER('{clean}')
-       OR LOWER(divisionname) = LOWER('{clean}')
-       OR LOWER(regionname) = LOWER('{clean}')
+    WHERE LOWER(district) = {needle}
+       OR LOWER(divisionname) = {needle}
+       OR LOWER(regionname) = {needle}
     GROUP BY district, statename
     ORDER BY match_count DESC
     LIMIT 1
@@ -105,18 +107,22 @@ def search_facilities(
     Matches against the specialties JSON array column.
     Returns results sorted by distance if lat/lon provided.
     """
-    distance_col = f"{_haversine_sql(lat, lon)} AS distance_km" if lat and lon else "NULL AS distance_km"
+    limit = max(1, min(int(limit or 20), 200))
+    use_geo = lat is not None and lon is not None
+    distance_col = (
+        f"{_haversine_sql(float(lat), float(lon))} AS distance_km"
+        if use_geo else "NULL AS distance_km"
+    )
 
-    # Build specialty filter: check if any term appears in the specialties JSON array
-    specialty_conditions = []
-    for term in specialty_terms:
-        specialty_conditions.append(f"LOWER(specialties) LIKE '%{term.lower()}%'")
-
-    # Also search in capability and procedure text
-    keyword_conditions = []
-    for term in specialty_terms:
-        keyword_conditions.append(f"LOWER(capability) LIKE '%{term.lower()}%'")
-        keyword_conditions.append(f"LOWER(procedure) LIKE '%{term.lower()}%'")
+    specialty_conditions: list[str] = []
+    keyword_conditions: list[str] = []
+    for term in specialty_terms or []:
+        if not term or not str(term).strip():
+            continue
+        pattern = sql_like(term)
+        specialty_conditions.append(f"LOWER(specialties) LIKE {pattern}")
+        keyword_conditions.append(f"LOWER(capability) LIKE {pattern}")
+        keyword_conditions.append(f"LOWER(procedure) LIKE {pattern}")
 
     specialty_filter = " OR ".join(specialty_conditions) if specialty_conditions else "TRUE"
     keyword_filter = " OR ".join(keyword_conditions) if keyword_conditions else "FALSE"
@@ -124,15 +130,17 @@ def search_facilities(
     where_parts = [f"(({specialty_filter}) OR ({keyword_filter}))"]
 
     if state:
-        where_parts.append(f"LOWER(address_stateOrRegion) LIKE LOWER('%{state}%')")
+        where_parts.append(
+            f"LOWER(address_stateOrRegion) LIKE {sql_like(state)}"
+        )
     if district:
         where_parts.append(
-            f"(LOWER(address_city) LIKE LOWER('%{district}%') "
-            f"OR LOWER(address_stateOrRegion) LIKE LOWER('%{district}%'))"
+            f"(LOWER(address_city) LIKE {sql_like(district)} "
+            f"OR LOWER(address_stateOrRegion) LIKE {sql_like(district)})"
         )
 
     where_clause = " AND ".join(where_parts)
-    order_by = "distance_km ASC NULLS LAST" if lat and lon else "name ASC"
+    order_by = "distance_km ASC NULLS LAST" if use_geo else "name ASC"
 
     sql = f"""
     SELECT
@@ -161,10 +169,11 @@ def search_facilities(
 
 def get_facility_by_id(db: DatabricksSQLClient, facility_id: str) -> dict | None:
     """Get full facility record from gold table (all columns + trust + search_text)."""
-    clean_id = facility_id.strip().replace("'", "''")
+    if not facility_id or not facility_id.strip():
+        return None
     sql = f"""
     SELECT * FROM {FACILITIES_GOLD}
-    WHERE unique_id = '{clean_id}'
+    WHERE unique_id = {sql_str(facility_id.strip())}
     """
     rows = db.execute(sql)
     return rows[0] if rows else None
@@ -172,10 +181,11 @@ def get_facility_by_id(db: DatabricksSQLClient, facility_id: str) -> dict | None
 
 def get_district_health(db: DatabricksSQLClient, district_name: str) -> dict | None:
     """Get NFHS-5 health indicators from the cleaned table."""
-    clean = district_name.strip().replace("'", "''").lower()
+    if not district_name or not district_name.strip():
+        return None
     sql = f"""
     SELECT * FROM {NFHS}
-    WHERE district_name = '{clean}'
+    WHERE district_name = {sql_str(district_name.strip().lower())}
     LIMIT 1
     """
     rows = db.execute(sql)
@@ -195,6 +205,7 @@ def get_capabilities_list(db: DatabricksSQLClient) -> list[str]:
 
 def get_desert_scores(db: DatabricksSQLClient, limit: int = 100) -> list[dict]:
     """Get pre-computed healthcare desert scores from gold table."""
+    limit = max(1, min(int(limit or 100), 500))
     sql = f"""
     SELECT * FROM {DESERT_SCORES}
     ORDER BY desert_score DESC
