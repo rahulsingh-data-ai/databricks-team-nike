@@ -1,244 +1,203 @@
-"""
-Referral Copilot — Bronze → Silver → Gold ETL Pipeline
-Delta Live Tables (DLT) pipeline for incremental data processing.
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Referral Copilot — Bronze → Silver → Gold ETL
+# MAGIC
+# MAGIC Medallion architecture for healthcare facility data.
+# MAGIC
+# MAGIC - **Bronze**: Raw FDR data (shared via Marketplace)
+# MAGIC - **Silver**: Cleaned, typed, normalized
+# MAGIC - **Gold**: Pre-computed trust scores, capability index, desert scores
+# MAGIC
+# MAGIC In production, this runs on a daily schedule to pick up new facility data from the FDR crawl.
 
-In production, the Virtue Foundation's FDR pipeline continuously crawls
-web sources and updates facility records. This pipeline incrementally
-processes those updates through our medallion architecture.
+# COMMAND ----------
 
-Bronze (source): databricks_virtue_foundation_dataset_dais_2026.virtue_foundation_dataset
-Silver (cleaned): workspace.referral_copilot (facilities_clean, pincode_deduped, nfhs_clean)
-Gold (app-ready): workspace.referral_copilot (capability_index, facility_trust_scores, desert_scores)
-"""
+BRONZE = "databricks_virtue_foundation_dataset_dais_2026.virtue_foundation_dataset"
+TARGET = "workspace.referral_copilot"
 
-import dlt
-from pyspark.sql import functions as F
-from pyspark.sql.types import ArrayType, StringType
+# COMMAND ----------
 
-BRONZE_CATALOG = "databricks_virtue_foundation_dataset_dais_2026"
-BRONZE_SCHEMA = "virtue_foundation_dataset"
+# MAGIC %md
+# MAGIC ## Silver Layer
 
+# COMMAND ----------
 
-# ============================================================
-# SILVER LAYER — Cleaned, typed, normalized
-# ============================================================
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.facilities_clean AS
+SELECT *,
+  CASE WHEN source_types IS NOT NULL
+    THEN SIZE(FROM_JSON(source_types, 'ARRAY<STRING>')) ELSE 0
+  END as source_count,
+  CASE WHEN source_types IS NOT NULL
+    THEN SIZE(ARRAY_DISTINCT(FROM_JSON(source_types, 'ARRAY<STRING>'))) ELSE 0
+  END as distinct_source_count,
+  CASE WHEN specialties IS NOT NULL
+    THEN SIZE(FROM_JSON(specialties, 'ARRAY<STRING>')) ELSE 0
+  END as specialty_count,
+  CASE WHEN capability IS NOT NULL
+    THEN SIZE(FROM_JSON(capability, 'ARRAY<STRING>')) ELSE 0
+  END as capability_count,
+  CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL
+    THEN true ELSE false
+  END as has_coordinates
+FROM {BRONZE}.facilities
+""")
 
-@dlt.table(
-    name="facilities_clean",
-    comment="Cleaned facility records with parsed source counts and coordinate flags",
+print(f"facilities_clean: {spark.table(f'{TARGET}.facilities_clean').count()} rows")
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.pincode_deduped AS
+SELECT
+  pincode, district, statename,
+  AVG(TRY_CAST(latitude AS DOUBLE)) as latitude,
+  AVG(TRY_CAST(longitude AS DOUBLE)) as longitude,
+  COUNT(*) as office_count,
+  FIRST(regionname) as regionname,
+  FIRST(divisionname) as divisionname
+FROM {BRONZE}.india_post_pincode_directory
+GROUP BY pincode, district, statename
+""")
+
+print(f"pincode_deduped: {spark.table(f'{TARGET}.pincode_deduped').count()} rows")
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.nfhs_clean AS
+SELECT
+  LOWER(TRIM(district_name)) as district_name,
+  LOWER(TRIM(state_ut)) as state_ut,
+  households_surveyed,
+  institutional_birth_5y_pct,
+  institutional_birth_in_public_facility_5y_pct,
+  hh_member_covered_health_insurance_pct,
+  hh_electricity_pct,
+  hh_improved_water_pct,
+  hh_use_improved_sanitation_pct,
+  households_using_clean_fuel_for_cooking_pct,
+  all_w15_49_who_are_anaemic_pct,
+  non_pregnant_w15_49_who_are_anaemic_lt_12_0_g_dl_22_pct,
+  prev_diarrhoea_2wk_child_u5_pct,
+  children_prev_symptoms_of_acute_respiratory_infection_ari_2_pct,
+  women_age_30_49_years_ever_undergone_a_cervical_screen_pct,
+  women_age_30_49_years_ever_undergone_a_breast_exam_pct,
+  w15_plus_with_high_or_very_high_gt_140_mg_dl_blood_sugar_or_pct,
+  m15_plus_with_high_or_very_high_gt_140_mg_dl_blood_sugar_or_pct,
+  w15_plus_with_high_bp_sys_gte_140_mmhg_and_or_dia_gte_90_mm_pct,
+  m15_plus_with_high_bp_sys_gte_140_mmhg_and_or_dia_gte_90_mm_pct
+FROM {BRONZE}.nfhs_5_district_health_indicators
+""")
+
+print(f"nfhs_clean: {spark.table(f'{TARGET}.nfhs_clean').count()} rows")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Gold Layer
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.capability_index AS
+SELECT
+  f.unique_id, f.name, f.facilityTypeId,
+  f.address_city, f.address_stateOrRegion, f.address_zipOrPostcode,
+  f.latitude, f.longitude, f.source_count, f.has_coordinates,
+  LOWER(TRIM(spec.specialty)) as specialty
+FROM {TARGET}.facilities_clean f
+LATERAL VIEW EXPLODE(FROM_JSON(f.specialties, 'ARRAY<STRING>')) spec AS specialty
+WHERE f.specialties IS NOT NULL
+""")
+
+print(f"capability_index: {spark.table(f'{TARGET}.capability_index').count()} rows")
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.facility_trust_scores AS
+SELECT
+  unique_id, name, facilityTypeId,
+  address_city, address_stateOrRegion,
+  latitude, longitude,
+  source_count, distinct_source_count,
+  specialty_count, capability_count, has_coordinates,
+  CASE
+    WHEN facilityTypeId IN ('clinic','dentist') AND specialty_count > 20 THEN 'suspicious'
+    WHEN distinct_source_count >= 3 AND specialty_count > 0 THEN 'strong_evidence'
+    WHEN distinct_source_count = 2 AND specialty_count > 0 THEN 'partial_evidence'
+    WHEN distinct_source_count >= 1 AND specialty_count > 0 THEN 'partial_evidence'
+    WHEN distinct_source_count >= 1 AND capability_count > 0 THEN 'weak_evidence'
+    WHEN capability_count > 0 THEN 'weak_evidence'
+    ELSE 'no_evidence'
+  END as base_trust_signal,
+  CASE
+    WHEN facilityTypeId IN ('clinic','dentist') AND specialty_count > 20 THEN 2
+    WHEN distinct_source_count >= 3 AND specialty_count > 0 THEN 5
+    WHEN distinct_source_count = 2 AND specialty_count > 0 THEN 4
+    WHEN distinct_source_count >= 1 AND specialty_count > 0 THEN 3
+    WHEN distinct_source_count >= 1 AND capability_count > 0 THEN 3
+    WHEN capability_count > 0 THEN 2
+    ELSE 1
+  END as trust_rank,
+  (CASE WHEN capacity IS NULL THEN 1 ELSE 0 END
+   + CASE WHEN numberDoctors IS NULL THEN 1 ELSE 0 END
+   + CASE WHEN yearEstablished IS NULL THEN 1 ELSE 0 END
+   + CASE WHEN recency_of_page_update IS NULL THEN 1 ELSE 0 END
+   + CASE WHEN distinct_source_count <= 1 THEN 1 ELSE 0 END
+   + CASE WHEN phone_numbers IS NULL AND officialPhone IS NULL THEN 1 ELSE 0 END
+  ) as missing_data_count
+FROM {TARGET}.facilities_clean
+""")
+
+print(f"facility_trust_scores: {spark.table(f'{TARGET}.facility_trust_scores').count()} rows")
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.desert_scores AS
+WITH district_facilities AS (
+  SELECT
+    LOWER(TRIM(address_stateOrRegion)) as state,
+    LOWER(TRIM(address_city)) as city,
+    COUNT(*) as total_facilities,
+    SUM(CASE WHEN base_trust_signal IN ('strong_evidence','partial_evidence') THEN 1 ELSE 0 END) as trusted_facilities,
+    AVG(trust_rank) as avg_trust_rank
+  FROM {TARGET}.facility_trust_scores
+  GROUP BY LOWER(TRIM(address_stateOrRegion)), LOWER(TRIM(address_city))
 )
-def facilities_clean():
-    df = spark.read.table(f"{BRONZE_CATALOG}.{BRONZE_SCHEMA}.facilities")
-    return (
-        df.withColumn(
-            "source_count",
-            F.when(F.col("source_types").isNotNull(),
-                   F.size(F.from_json(F.col("source_types"), ArrayType(StringType()))))
-            .otherwise(0),
-        )
-        .withColumn(
-            "distinct_source_count",
-            F.when(F.col("source_types").isNotNull(),
-                   F.size(F.array_distinct(F.from_json(F.col("source_types"), ArrayType(StringType())))))
-            .otherwise(0),
-        )
-        .withColumn(
-            "specialty_count",
-            F.when(F.col("specialties").isNotNull(),
-                   F.size(F.from_json(F.col("specialties"), ArrayType(StringType()))))
-            .otherwise(0),
-        )
-        .withColumn(
-            "capability_count",
-            F.when(F.col("capability").isNotNull(),
-                   F.size(F.from_json(F.col("capability"), ArrayType(StringType()))))
-            .otherwise(0),
-        )
-        .withColumn(
-            "has_coordinates",
-            F.col("latitude").isNotNull() & F.col("longitude").isNotNull(),
-        )
-    )
+SELECT
+  n.district_name, n.state_ut,
+  COALESCE(f.total_facilities, 0) as total_facilities,
+  COALESCE(f.trusted_facilities, 0) as trusted_facilities,
+  COALESCE(f.avg_trust_rank, 0) as avg_trust_rank,
+  n.institutional_birth_5y_pct,
+  n.hh_member_covered_health_insurance_pct,
+  n.all_w15_49_who_are_anaemic_pct,
+  n.households_surveyed,
+  ROUND(
+    ((100 - COALESCE(n.institutional_birth_5y_pct, 50))
+     + (100 - COALESCE(n.hh_member_covered_health_insurance_pct, 20)))
+    / (COALESCE(f.trusted_facilities, 0) + 1), 2
+  ) as desert_score
+FROM {TARGET}.nfhs_clean n
+LEFT JOIN district_facilities f
+  ON n.district_name = f.city OR n.state_ut = f.state
+ORDER BY desert_score DESC
+""")
 
+print(f"desert_scores: {spark.table(f'{TARGET}.desert_scores').count()} rows")
 
-@dlt.table(
-    name="pincode_deduped",
-    comment="Deduplicated pincode directory — one row per (pincode, district, state) with averaged coordinates",
-)
-def pincode_deduped():
-    df = spark.read.table(f"{BRONZE_CATALOG}.{BRONZE_SCHEMA}.india_post_pincode_directory")
-    return (
-        df.withColumn("lat_num", F.try_cast(F.col("latitude"), "double"))
-        .withColumn("lon_num", F.try_cast(F.col("longitude"), "double"))
-        .groupBy("pincode", "district", "statename")
-        .agg(
-            F.avg("lat_num").alias("latitude"),
-            F.avg("lon_num").alias("longitude"),
-            F.count("*").alias("office_count"),
-            F.first("regionname").alias("regionname"),
-            F.first("divisionname").alias("divisionname"),
-        )
-    )
+# COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Summary
 
-@dlt.table(
-    name="nfhs_clean",
-    comment="Normalized NFHS-5 district health indicators with lowercase district/state names",
-)
-def nfhs_clean():
-    df = spark.read.table(f"{BRONZE_CATALOG}.{BRONZE_SCHEMA}.nfhs_5_district_health_indicators")
-    return (
-        df.withColumn("district_name", F.lower(F.trim(F.col("district_name"))))
-        .withColumn("state_ut", F.lower(F.trim(F.col("state_ut"))))
-        .select(
-            "district_name", "state_ut", "households_surveyed",
-            "institutional_birth_5y_pct", "institutional_birth_in_public_facility_5y_pct",
-            "hh_member_covered_health_insurance_pct", "hh_electricity_pct",
-            "hh_improved_water_pct", "hh_use_improved_sanitation_pct",
-            "households_using_clean_fuel_for_cooking_pct",
-            "all_w15_49_who_are_anaemic_pct",
-            "non_pregnant_w15_49_who_are_anaemic_lt_12_0_g_dl_22_pct",
-            "women_age_15_49_years_whose_bmi_bmi_is_underweight_bmi_lt_1_pct",
-            "women_age_15_49_years_who_are_overweight_obese_bmi_gte_25_0_pct",
-            "prev_diarrhoea_2wk_child_u5_pct",
-            "children_prev_symptoms_of_acute_respiratory_infection_ari_2_pct",
-            "women_age_30_49_years_ever_undergone_a_cervical_screen_pct",
-            "women_age_30_49_years_ever_undergone_a_breast_exam_pct",
-            "w15_plus_with_high_or_very_high_gt_140_mg_dl_blood_sugar_or_pct",
-            "m15_plus_with_high_or_very_high_gt_140_mg_dl_blood_sugar_or_pct",
-            "w15_plus_with_high_bp_sys_gte_140_mmhg_and_or_dia_gte_90_mm_pct",
-            "m15_plus_with_high_bp_sys_gte_140_mmhg_and_or_dia_gte_90_mm_pct",
-        )
-    )
+# COMMAND ----------
 
+for table in ["facilities_clean", "pincode_deduped", "nfhs_clean", "capability_index", "facility_trust_scores", "desert_scores"]:
+    count = spark.table(f"{TARGET}.{table}").count()
+    print(f"{table:30s} {count:>10,} rows")
 
-# ============================================================
-# GOLD LAYER — Aggregated, pre-computed, app-ready
-# ============================================================
-
-@dlt.table(
-    name="capability_index",
-    comment="Exploded capability index — one row per (facility, specialty) for fast search",
-)
-def capability_index():
-    facilities = dlt.read("facilities_clean")
-    return (
-        facilities.filter(F.col("specialties").isNotNull())
-        .select(
-            "unique_id", "name", "facilityTypeId",
-            "address_city", "address_stateOrRegion", "address_zipOrPostcode",
-            "latitude", "longitude", "source_count", "has_coordinates",
-            F.explode(F.from_json(F.col("specialties"), ArrayType(StringType()))).alias("specialty"),
-        )
-        .withColumn("specialty", F.lower(F.trim(F.col("specialty"))))
-    )
-
-
-@dlt.table(
-    name="facility_trust_scores",
-    comment="Pre-computed trust signal per facility based on source diversity and data completeness",
-)
-def facility_trust_scores():
-    facilities = dlt.read("facilities_clean")
-    return (
-        facilities.withColumn(
-            "base_trust_signal",
-            F.when(
-                (F.col("facilityTypeId").isin("clinic", "dentist")) & (F.col("specialty_count") > 20),
-                F.lit("suspicious"),
-            )
-            .when(
-                (F.col("distinct_source_count") >= 3) & (F.col("specialty_count") > 0),
-                F.lit("strong_evidence"),
-            )
-            .when(
-                (F.col("distinct_source_count") == 2) & (F.col("specialty_count") > 0),
-                F.lit("partial_evidence"),
-            )
-            .when(
-                (F.col("distinct_source_count") >= 1) & (F.col("specialty_count") > 0),
-                F.lit("partial_evidence"),
-            )
-            .when(
-                (F.col("distinct_source_count") >= 1) & (F.col("capability_count") > 0),
-                F.lit("weak_evidence"),
-            )
-            .when(F.col("capability_count") > 0, F.lit("weak_evidence"))
-            .otherwise(F.lit("no_evidence")),
-        )
-        .withColumn(
-            "trust_rank",
-            F.when(F.col("base_trust_signal") == "strong_evidence", 5)
-            .when(F.col("base_trust_signal") == "partial_evidence", 4)
-            .when(F.col("base_trust_signal") == "weak_evidence", 3)
-            .when(F.col("base_trust_signal") == "suspicious", 2)
-            .otherwise(1),
-        )
-        .withColumn(
-            "missing_data_count",
-            (F.when(F.col("capacity").isNull(), 1).otherwise(0)
-             + F.when(F.col("numberDoctors").isNull(), 1).otherwise(0)
-             + F.when(F.col("yearEstablished").isNull(), 1).otherwise(0)
-             + F.when(F.col("recency_of_page_update").isNull(), 1).otherwise(0)
-             + F.when(F.col("distinct_source_count") <= 1, 1).otherwise(0)
-             + F.when(F.col("phone_numbers").isNull() & F.col("officialPhone").isNull(), 1).otherwise(0)),
-        )
-        .select(
-            "unique_id", "name", "facilityTypeId",
-            "address_city", "address_stateOrRegion",
-            "latitude", "longitude",
-            "source_count", "distinct_source_count",
-            "specialty_count", "capability_count", "has_coordinates",
-            "base_trust_signal", "trust_rank", "missing_data_count",
-        )
-    )
-
-
-@dlt.table(
-    name="desert_scores",
-    comment="Healthcare desert scores: high disease burden vs low trusted facility coverage per district",
-)
-def desert_scores():
-    trust = dlt.read("facility_trust_scores")
-    nfhs = dlt.read("nfhs_clean")
-
-    district_facilities = (
-        trust.withColumn("state", F.lower(F.trim(F.col("address_stateOrRegion"))))
-        .withColumn("city", F.lower(F.trim(F.col("address_city"))))
-        .groupBy("state", "city")
-        .agg(
-            F.count("*").alias("total_facilities"),
-            F.sum(F.when(F.col("base_trust_signal").isin("strong_evidence", "partial_evidence"), 1).otherwise(0))
-            .alias("trusted_facilities"),
-            F.avg("trust_rank").alias("avg_trust_rank"),
-        )
-    )
-
-    return (
-        nfhs.join(
-            district_facilities,
-            (nfhs.district_name == district_facilities.city)
-            | (nfhs.state_ut == district_facilities.state),
-            "left",
-        )
-        .withColumn("total_facilities", F.coalesce(F.col("total_facilities"), F.lit(0)))
-        .withColumn("trusted_facilities", F.coalesce(F.col("trusted_facilities"), F.lit(0)))
-        .withColumn("avg_trust_rank", F.coalesce(F.col("avg_trust_rank"), F.lit(0)))
-        .withColumn(
-            "desert_score",
-            F.round(
-                ((100 - F.coalesce(F.col("institutional_birth_5y_pct"), F.lit(50)))
-                 + (100 - F.coalesce(F.col("hh_member_covered_health_insurance_pct"), F.lit(20))))
-                / (F.col("trusted_facilities") + 1),
-                2,
-            ),
-        )
-        .select(
-            "district_name", "state_ut",
-            "total_facilities", "trusted_facilities", "avg_trust_rank",
-            "institutional_birth_5y_pct", "hh_member_covered_health_insurance_pct",
-            "all_w15_49_who_are_anaemic_pct", "households_surveyed",
-            "desert_score",
-        )
-        .orderBy(F.desc("desert_score"))
-    )
+print("\nETL complete. All tables refreshed.")
