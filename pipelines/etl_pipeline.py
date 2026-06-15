@@ -327,14 +327,72 @@ SELECT *,
   source_types_lc LIKE '%mongo_ngo%' AS is_ngo_source
 FROM enriched
 """)
-print(f"facilities_gold: {spark.table(f'{TARGET}.facilities_gold').count()} rows")
+print(f"facilities_gold (pre geo-resolve): {spark.table(f'{TARGET}.facilities_gold').count()} rows")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Geo resolution
+# MAGIC Normalize the pincode (strip spaces) and use the India Post directory
+# MAGIC to derive an authoritative state + district. This catches facilities
+# MAGIC where address_stateOrRegion is actually a city ("Navi Mumbai") or a
+# MAGIC stale label ("Orissa").
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.facilities_gold AS
+WITH pin_lookup AS (
+  SELECT pincode, MIN(district) district, MIN(statename) statename
+  FROM {TARGET}.pincode_deduped
+  WHERE LOWER(TRIM(statename)) <> 'na'
+  GROUP BY pincode
+),
+state_alias AS (
+  SELECT * FROM (VALUES
+    ('tamilnadu','tamil nadu'),('orissa','odisha'),
+    ('pondicherry','puducherry'),('punjab region','punjab'),
+    ('uttaranchal','uttarakhand'),('uttarpradesh','uttar pradesh'),
+    ('andhrapradesh','andhra pradesh'),('madhyapradesh','madhya pradesh'),
+    ('j&k','jammu and kashmir'),('chattisgarh','chhattisgarh'),
+    ('newdelhi','delhi'),('new delhi','delhi'),
+    ('navi mumbai','maharashtra'),('thane','maharashtra'),
+    ('pune','maharashtra'),('mumbai','maharashtra'),('nagpur','maharashtra'),
+    ('chennai','tamil nadu'),('coimbatore','tamil nadu'),('madurai','tamil nadu'),
+    ('bengaluru','karnataka'),('bangalore','karnataka'),('mysore','karnataka'),
+    ('hyderabad','telangana'),('kolkata','west bengal'),
+    ('thiruvananthapuram','kerala'),('kochi','kerala'),('ernakulam','kerala'),
+    ('kozhikode','kerala'),('malappuram','kerala'),('kollam','kerala')
+  ) AS t(alias, canonical)
+)
+SELECT
+  g.* EXCEPT(address_zipOrPostcode),
+  TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) AS pin_raw,
+  CASE WHEN TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$'
+       THEN TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) END AS address_zipOrPostcode,
+  (TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) RLIKE '^[0-9]{{6}}$') AS pincode_valid_format,
+  p.statename AS pin_state,
+  p.district AS pin_district,
+  COALESCE(p.statename, sa.canonical, LOWER(TRIM(g.address_stateOrRegion))) AS state_resolved,
+  COALESCE(p.district, LOWER(TRIM(g.address_city))) AS district_resolved,
+  (p.statename IS NOT NULL
+    AND LOWER(TRIM(p.statename)) <> COALESCE(sa.canonical, LOWER(TRIM(g.address_stateOrRegion)))
+  ) AS pincode_state_mismatch
+FROM {TARGET}.facilities_gold g
+LEFT JOIN pin_lookup p
+  ON TRY_CAST(TRIM(REPLACE(g.address_zipOrPostcode, ' ', '')) AS BIGINT) = p.pincode
+LEFT JOIN state_alias sa
+  ON LOWER(TRIM(g.address_stateOrRegion)) = sa.alias
+""")
+print(f"facilities_gold (with geo-resolve): {spark.table(f'{TARGET}.facilities_gold').count()} rows")
 
 # COMMAND ----------
 
 spark.sql(f"""
 CREATE OR REPLACE TABLE {TARGET}.facilities_vs_source AS
 SELECT unique_id, name, facilityTypeId, address_city, address_stateOrRegion,
-  address_zipOrPostcode, latitude, longitude, specialties, capability, description,
+  address_zipOrPostcode, state_resolved, district_resolved, pincode_state_mismatch,
+  latitude, longitude, specialties, capability, description,
   source_types, source_urls, capacity, numberDoctors, yearEstablished,
   base_trust_signal, trust_rank, missing_data_count, distinct_source_count,
   has_doctors, has_capacity, has_year_established, has_coordinates,
