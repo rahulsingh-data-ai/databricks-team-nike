@@ -1,0 +1,22 @@
+bundle:
+  name: "team-nike-hackathon"
+
+sync:
+  include:
+    - .build
+
+artifacts:
+  default:
+    build: apx build
+
+resources:
+  apps:
+    team-nike-hackathon-app:
+      name: "team-nike-hackathon"
+      description: "team-nike-hackathon created with apx"
+      source_code_path: ./.build
+
+targets:
+  dev:
+    mode: development
+    default: true
