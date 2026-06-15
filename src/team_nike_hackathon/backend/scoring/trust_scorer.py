@@ -110,22 +110,28 @@ def score_facility(
     in_freetext = _capability_in_freetext(search_terms, capability, procedure, equipment, description)
     is_conflicting = _has_conflicting_signals(facility, search_terms)
 
-    # Build missing evidence list
+    # Build missing evidence list (real emptiness check, not just NULL)
     missing = []
-    if not facility.get("capacity"):
-        missing.append("No bed capacity data")
-    if not facility.get("yearEstablished"):
+    cap = facility.get("capacity") or ""
+    if not cap or cap in ("0", "null", "unknown", "Unknown", "N/A"):
+        missing.append("No bed capacity data (75% of facilities lack this)")
+    yr = facility.get("yearEstablished") or ""
+    if not yr or yr in ("null", "unknown", "Unknown"):
         missing.append("No establishment year")
-    if not facility.get("numberDoctors"):
-        missing.append("No doctor count")
+    docs = facility.get("numberDoctors") or ""
+    if not docs or docs in ("0", "null", "unknown", "Unknown"):
+        missing.append("No doctor count (64% of facilities lack this)")
     if not recency:
         missing.append("No recent verification timestamp")
     if num_sources <= 1:
         missing.append("No secondary source confirmation")
     if not facility.get("phone_numbers") and not facility.get("officialPhone"):
         missing.append("No contact phone number")
-    if not source_urls:
+    if not source_urls or len(str(source_urls)) < 5:
         missing.append("No source URLs for verification")
+    equip = facility.get("equipment") or ""
+    if not equip or len(str(equip)) < 5:
+        missing.append("No equipment data (23% of facilities lack this)")
 
     # Classification logic (thresholds match gold table)
     if is_conflicting:
