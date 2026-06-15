@@ -221,12 +221,74 @@ print(f"desert_scores: {spark.table(f'{TARGET}.desert_scores').count()} rows")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Final Gold Table + Vector Search Source
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.facilities_gold AS
+WITH deduped AS (
+  SELECT f.*, t.base_trust_signal, t.trust_rank, t.missing_data_count, e.search_text,
+    ROW_NUMBER() OVER (PARTITION BY f.unique_id ORDER BY f.distinct_source_count DESC) as rn
+  FROM {TARGET}.facilities_clean f
+  LEFT JOIN (SELECT DISTINCT unique_id, base_trust_signal, trust_rank, missing_data_count
+             FROM {TARGET}.facility_trust_scores) t ON f.unique_id = t.unique_id
+  LEFT JOIN {TARGET}.facility_embeddings e ON f.unique_id = e.unique_id
+)
+SELECT * EXCEPT(rn) FROM deduped WHERE rn = 1
+""")
+print(f"facilities_gold: {spark.table(f'{TARGET}.facilities_gold').count()} rows")
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {TARGET}.facilities_vs_source AS
+SELECT unique_id, name, facilityTypeId, address_city, address_stateOrRegion,
+  address_zipOrPostcode, latitude, longitude, specialties, capability, description,
+  source_types, source_urls, capacity, numberDoctors, yearEstablished,
+  base_trust_signal, trust_rank, missing_data_count, distinct_source_count,
+  has_doctors, has_capacity, has_year_established, has_coordinates, search_text
+FROM {TARGET}.facilities_gold
+""")
+print(f"facilities_vs_source: {spark.table(f'{TARGET}.facilities_vs_source').count()} rows")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Summary
 
 # COMMAND ----------
 
-for table in ["facilities_clean", "pincode_deduped", "nfhs_clean", "capability_index", "facility_trust_scores", "desert_scores"]:
+for table in ["facilities_clean", "pincode_deduped", "nfhs_clean", "capability_index", "facility_trust_scores", "desert_scores", "facilities_gold", "facilities_vs_source"]:
     count = spark.table(f"{TARGET}.{table}").count()
     print(f"{table:30s} {count:>10,} rows")
 
-print("\nETL complete. All tables refreshed.")
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Refresh Vector Search Index
+
+# COMMAND ----------
+
+import requests, os
+
+host = os.environ.get("DATABRICKS_HOST", spark.conf.get("spark.databricks.workspaceUrl", ""))
+if not host.startswith("https://"):
+    host = f"https://{host}"
+
+token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().getOrElse(None)
+VS_INDEX = "workspace.referral_copilot.facilities_vs_index"
+
+try:
+    resp = requests.post(
+        f"{host}/api/2.0/vector-search/indexes/{VS_INDEX}/sync",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        timeout=30,
+    )
+    print(f"Vector index sync triggered: {resp.status_code} {resp.text[:200]}")
+except Exception as e:
+    print(f"Vector index sync skipped: {e}")
+
+# COMMAND ----------
+
+print("\nETL complete. All tables refreshed. Vector index sync triggered.")
