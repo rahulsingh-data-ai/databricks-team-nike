@@ -63,10 +63,17 @@ def get_database_name() -> str:
 
 
 def _decode_secret(ws: WorkspaceClient, scope: str, key: str) -> str:
+    """Return the decoded secret value, with leading/trailing whitespace stripped.
+
+    The strip is defensive: ``databricks secrets put-secret`` opens ``$EDITOR``
+    and a final newline often sneaks into the saved file. Without the strip,
+    OAuth client_id/client_secret values would carry the ``\\n`` and the IdP
+    would reject them with ``invalid_client``.
+    """
     raw = ws.secrets.get_secret(scope=scope, key=key).value
     if raw is None:
         raise ValueError(f"Secret {scope}/{key} has no value")
-    return b64decode(raw).decode("utf-8")
+    return b64decode(raw).decode("utf-8").strip()
 
 
 _lakebase_ws: WorkspaceClient | None = None
