@@ -71,13 +71,17 @@ SELECT
   (NULLIF(NULLIF(NULLIF(NULLIF(yearEstablished, ''), 'null'), 'Unknown'), 'unknown') IS NOT NULL) as has_year_established
 FROM {BRONZE}.facilities
 WHERE
-  -- The upstream FDR pipeline emits ~54 misaligned rows where unique_id
-  -- contains markdown fragments and the real fields are shifted into the
-  -- wrong columns. They all lack name + coordinates, so drop them here.
+  -- Data quality filters:
+  -- 1) Drop ~54 misaligned rows where unique_id holds markdown fragments
+  --    and the real fields shifted into the wrong columns (no name/coords)
+  -- 2) Drop ~6 rows with coordinates outside India's bounding box
+  --    (lat/lon clearly swapped or randomly garbled by upstream extractor)
   name IS NOT NULL
   AND TRIM(name) <> ''
   AND latitude IS NOT NULL
   AND longitude IS NOT NULL
+  AND latitude BETWEEN 6 AND 38
+  AND longitude BETWEEN 68 AND 98
 """)
 
 print(f"facilities_clean: {spark.table(f'{TARGET}.facilities_clean').count()} rows")
@@ -194,33 +198,51 @@ print(f"facility_trust_scores: {spark.table(f'{TARGET}.facility_trust_scores').c
 
 spark.sql(f"""
 CREATE OR REPLACE TABLE {TARGET}.desert_scores AS
-WITH district_facilities AS (
+WITH dist_facilities AS (
   SELECT
-    LOWER(TRIM(address_stateOrRegion)) as state,
-    LOWER(TRIM(address_city)) as city,
-    COUNT(*) as total_facilities,
-    SUM(CASE WHEN base_trust_signal IN ('strong_evidence','partial_evidence') THEN 1 ELSE 0 END) as trusted_facilities,
-    AVG(trust_rank) as avg_trust_rank
+    LOWER(TRIM(address_city))           as district_key,
+    LOWER(TRIM(address_stateOrRegion))  as state_key,
+    COUNT(*)                            as total_facilities,
+    SUM(CASE WHEN base_trust_signal IN ('strong_evidence','partial_evidence')
+             THEN 1 ELSE 0 END)         as trusted_facilities,
+    AVG(trust_rank)                     as avg_trust_rank
   FROM {TARGET}.facility_trust_scores
-  GROUP BY LOWER(TRIM(address_stateOrRegion)), LOWER(TRIM(address_city))
+  GROUP BY LOWER(TRIM(address_city)), LOWER(TRIM(address_stateOrRegion))
+),
+district_match AS (
+  SELECT
+    n.district_name, n.state_ut,
+    n.households_surveyed,
+    n.institutional_birth_5y_pct,
+    n.hh_member_covered_health_insurance_pct,
+    n.all_w15_49_who_are_anaemic_pct,
+    -- Prefer a city-name match, fall back to state-name match.
+    -- Aggregate so each NFHS district appears exactly once.
+    MAX(COALESCE(f1.total_facilities,   f2.total_facilities,   0)) as total_facilities,
+    MAX(COALESCE(f1.trusted_facilities, f2.trusted_facilities, 0)) as trusted_facilities,
+    MAX(COALESCE(f1.avg_trust_rank,     f2.avg_trust_rank,     0)) as avg_trust_rank
+  FROM {TARGET}.nfhs_clean n
+  LEFT JOIN dist_facilities f1 ON n.district_name = f1.district_key
+  LEFT JOIN dist_facilities f2 ON n.state_ut      = f2.state_key
+                              AND f1.district_key IS NULL
+  GROUP BY n.district_name, n.state_ut, n.households_surveyed,
+           n.institutional_birth_5y_pct,
+           n.hh_member_covered_health_insurance_pct,
+           n.all_w15_49_who_are_anaemic_pct
 )
 SELECT
-  n.district_name, n.state_ut,
-  COALESCE(f.total_facilities, 0) as total_facilities,
-  COALESCE(f.trusted_facilities, 0) as trusted_facilities,
-  COALESCE(f.avg_trust_rank, 0) as avg_trust_rank,
-  n.institutional_birth_5y_pct,
-  n.hh_member_covered_health_insurance_pct,
-  n.all_w15_49_who_are_anaemic_pct,
-  n.households_surveyed,
+  district_name, state_ut,
+  total_facilities, trusted_facilities, avg_trust_rank,
+  institutional_birth_5y_pct,
+  hh_member_covered_health_insurance_pct,
+  all_w15_49_who_are_anaemic_pct,
+  households_surveyed,
   ROUND(
-    ((100 - COALESCE(n.institutional_birth_5y_pct, 50))
-     + (100 - COALESCE(n.hh_member_covered_health_insurance_pct, 20)))
-    / (COALESCE(f.trusted_facilities, 0) + 1), 2
+    ((100 - COALESCE(institutional_birth_5y_pct, 50))
+     + (100 - COALESCE(hh_member_covered_health_insurance_pct, 20)))
+    / (trusted_facilities + 1), 2
   ) as desert_score
-FROM {TARGET}.nfhs_clean n
-LEFT JOIN district_facilities f
-  ON n.district_name = f.city OR n.state_ut = f.state
+FROM district_match
 ORDER BY desert_score DESC
 """)
 
