@@ -1,17 +1,18 @@
 """Lakebase SQLAlchemy engine, session dependency, and table initialisation.
 
-In production the SQLAlchemy engine connects to a Lakebase Autoscaling
-Postgres endpoint (``WorkspaceClient.postgres``) via an admin service
-principal whose OAuth credentials live in a Databricks secret scope. In
-local development (``apx dev start``) the engine connects to the local
-Postgres that apx vends via ``APX_DEV_DB_PORT`` so the app boots without
-needing a real Lakebase endpoint or secret scope wired up.
+Connects to Lakebase Autoscaling Postgres (``WorkspaceClient.postgres``) in
+both dev and prod. The connecting identity differs by environment:
+
+* **Local dev**: the ambient ``WorkspaceClient`` (your CLI profile = you).
+* **Deployed Databricks App**: the admin Service Principal whose OAuth
+  credentials live in the project's Databricks secret scope.
+
+See ``backend/lakebase_query.py`` for the identity-switching helpers.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Generator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncGenerator, TypeAlias
@@ -25,10 +26,9 @@ from sqlmodel import Session, SQLModel, text
 from ..lakebase_query import (
     DATABASE_NAME,
     ENDPOINT_NAME,
-    POSTGRES_ROLE,
+    get_db_client,
     get_endpoint_host,
-    get_lakebase_ws,
-    is_dev_mode,
+    get_postgres_user,
     vend_db_token,
 )
 from ._base import LifespanDependency
@@ -38,37 +38,17 @@ from ._config import logger
 # --- Engine creation ---
 
 
-def _build_dev_engine_url() -> str:
-    port = os.environ.get("APX_DEV_DB_PORT")
-    password = os.environ.get("APX_DEV_DB_PWD")
-    if port is None or password is None:
-        raise ValueError(
-            "APX server didn't provide APX_DEV_DB_PORT / APX_DEV_DB_PWD; "
-            "please check the dev server logs"
-        )
-    logger.info("Using local dev database at localhost:%s", port)
-    return (
-        f"postgresql+psycopg://postgres:{password}"
-        f"@localhost:{port}/postgres?sslmode=disable"
-    )
-
-
 def create_db_engine(ws: WorkspaceClient) -> Engine:
-    """Create a SQLAlchemy engine.
+    """Create a SQLAlchemy engine pointed at the Lakebase endpoint.
 
-    Local dev: connects to the apx-vended Postgres on ``APX_DEV_DB_PORT`` —
-    no SSL, no password callback. Production: connects to the Lakebase
-    Autoscaling Postgres ``ENDPOINT_NAME`` using the admin-SP
-    ``WorkspaceClient`` from :func:`get_lakebase_ws`, with a per-connection
-    OAuth token refresh.
+    The engine refreshes the Postgres password on every new physical
+    connection via a ``do_connect`` listener that re-vends an OAuth token.
     """
-    if is_dev_mode():
-        return create_engine(_build_dev_engine_url(), pool_size=4, pool_recycle=45 * 60)
-
-    db_ws = get_lakebase_ws(ws)
+    db_ws = get_db_client(ws)
     host = get_endpoint_host(db_ws)
+    user = get_postgres_user(db_ws)
 
-    engine_url = f"postgresql+psycopg://{POSTGRES_ROLE}:@{host}:5432/{DATABASE_NAME}"
+    engine_url = f"postgresql+psycopg://{user}:@{host}:5432/{DATABASE_NAME}"
     engine_kwargs: dict[str, Any] = {
         "connect_args": {"sslmode": "require"},
         "pool_size": 8,
@@ -83,20 +63,17 @@ def create_db_engine(ws: WorkspaceClient) -> Engine:
     event.listens_for(engine, "do_connect")(_refresh_token)
 
     logger.info(
-        "SQLAlchemy engine created (endpoint=%s, database=%s)",
+        "SQLAlchemy engine created (endpoint=%s, database=%s, user=%s)",
         ENDPOINT_NAME,
         DATABASE_NAME,
+        user,
     )
     return engine
 
 
 def validate_db(engine: Engine) -> None:
     """Smoke-test the database connection with ``SELECT 1``."""
-    if is_dev_mode():
-        logger.info("Validating local dev database connection")
-    else:
-        logger.info("Validating database connection to endpoint %s", ENDPOINT_NAME)
-
+    logger.info("Validating database connection to endpoint %s", ENDPOINT_NAME)
     try:
         with Session(engine) as session:
             session.connection().execute(text("SELECT 1"))

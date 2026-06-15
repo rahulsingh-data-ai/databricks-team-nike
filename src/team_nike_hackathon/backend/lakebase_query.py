@@ -1,16 +1,26 @@
 """Lakebase connection management.
 
-Provides a shared admin-SP ``WorkspaceClient`` and a psycopg ``ConnectionPool``
-used by the SQLAlchemy engine in ``core/lakebase.py``. The admin SP's
-``client_id`` / ``client_secret`` live in a Databricks secret scope and are
-loaded once per process; both the SQLAlchemy engine and any raw-psycopg
-callers share the same OAuth identity from there.
+Targets **Lakebase Autoscaling Postgres** (``WorkspaceClient.postgres``),
+which uses ``projects → branches → endpoints``.
 
-This module targets the **Lakebase Autoscaling Postgres** API
-(``WorkspaceClient.postgres``), which uses ``projects → branches → endpoints``
-instead of the older provisioned ``database_instances`` shape. The admin SP
-must have a Postgres role provisioned on the target branch; the role's
-``postgres_role`` value is what we send as the connection username.
+Identity switching:
+
+* **Local dev** (running on your laptop, no ``DATABRICKS_APP_PORT``):
+  use the ambient ``WorkspaceClient`` from the personal CLI profile — i.e.
+  authenticate as *you*. Your user already has a Postgres role on the
+  branch (the auto-created ``DATABRICKS_SUPERUSER`` role), so connections
+  just work.
+* **Deployed Databricks App** (``DATABRICKS_APP_PORT`` set): swap to the
+  admin Service Principal whose OAuth ``client_id`` / ``client_secret``
+  live in a Databricks secret scope. ``auth_type='oauth-m2m'`` is set
+  explicitly so the SDK does not silently fall back to the app's own SP
+  via the platform-injected env vars.
+
+Whichever identity is in use, ``ws.current_user.me().user_name`` is the
+Postgres role name to send as the connection user (the SDK reports the
+email for users and the application id for service principals, which is
+exactly what Lakebase assigns as ``postgres_role`` when you provision
+the role).
 """
 
 from __future__ import annotations
@@ -29,9 +39,6 @@ from .core._config import logger
 # Lakebase Autoscaling Postgres location
 # ---------------------------------------------------------------------------
 
-# The Lakebase Autoscaling Postgres project / branch / endpoint to connect to.
-# Provision these in the Databricks UI (Compute → Lakebase) before deploying.
-# The full endpoint resource name is built from these three pieces.
 PROJECT_ID = "dais-hackathon"
 BRANCH_ID = "production"
 ENDPOINT_ID = "primary"
@@ -40,45 +47,31 @@ ENDPOINT_NAME = (
 )
 
 # Postgres database name inside the branch. ``databricks_postgres`` is the
-# built-in default for Lakebase Autoscaling Postgres; change this only if you
-# provisioned a custom database.
+# built-in default for Lakebase Autoscaling Postgres.
 DATABASE_NAME = "databricks_postgres"
 
-# Postgres role (username) used to log into the database. This is the
-# ``postgres_role`` value of the Lakebase role provisioned for the admin SP
-# on ``BRANCH_ID`` — typically the SP's application id. Create the role with::
-#
-#   databricks postgres create-role \\
-#       projects/<project>/branches/<branch> \\
-#       --role-id team-nike-hackathon-admin-sp \\
-#       --json '{"spec": {"identity_type": "SERVICE_PRINCIPAL", ...}}'
-#
-# (or via the Python SDK, see ``ws.postgres.create_role``).
-POSTGRES_ROLE = "2a5b4d83-402c-4227-a472-c500fb69d191"
-
 # ---------------------------------------------------------------------------
-# Secret scope (admin-SP OAuth credentials)
+# Secret scope (admin-SP OAuth credentials, prod only)
 # ---------------------------------------------------------------------------
 
-# Name of the Databricks secret scope that holds the admin-SP credentials.
-# The scope must contain two keys:
-#   - ``sp-client-id``      : the admin service principal's OAuth client id
-#   - ``sp-client-secret``  : the admin service principal's OAuth client secret
-# Create with:
+# Name of the Databricks secret scope holding the admin-SP creds. Required
+# keys: ``sp-client-id`` and ``sp-client-secret``. Create with::
+#
 #   databricks secrets create-scope team-nike-hackathon -p personal
-#   databricks secrets put-secret team-nike-hackathon sp-client-id     -p personal
-#   databricks secrets put-secret team-nike-hackathon sp-client-secret -p personal
+#   databricks secrets put-secret  team-nike-hackathon sp-client-id     -p personal
+#   databricks secrets put-secret  team-nike-hackathon sp-client-secret -p personal
 SECRET_SCOPE = "team-nike-hackathon"
-
-# Secret keys inside SECRET_SCOPE. Change these if you prefer a different
-# naming convention in your scope.
 SP_CLIENT_ID_KEY = "sp-client-id"
 SP_CLIENT_SECRET_KEY = "sp-client-secret"
 
 
-def is_dev_mode() -> bool:
-    """True when running under the apx local dev server."""
-    return os.environ.get("APX_DEV_DB_PORT") is not None
+def is_deployed() -> bool:
+    """True when running inside a Databricks App on the platform.
+
+    Databricks Apps inject ``DATABRICKS_APP_PORT`` into the runtime env;
+    local CLI dev (``apx dev start`` or plain ``uvicorn``) does not.
+    """
+    return "DATABRICKS_APP_PORT" in os.environ
 
 
 def _decode_secret(ws: WorkspaceClient, scope: str, key: str) -> str:
@@ -99,44 +92,59 @@ _lakebase_ws: WorkspaceClient | None = None
 _lakebase_ws_lock = threading.Lock()
 
 
-def get_lakebase_ws(ws: WorkspaceClient) -> WorkspaceClient:
-    """Return a ``WorkspaceClient`` authenticated as the admin service principal.
+def _build_admin_sp_ws(ws: WorkspaceClient) -> WorkspaceClient:
+    """Build a ``WorkspaceClient`` authenticated as the admin service principal.
 
-    Credentials are read once from ``SECRET_SCOPE`` and cached for the lifetime
-    of the process. The passed-in ``ws`` is only used to read the secrets — the
-    returned client is a separate identity, owned by the SP whose creds live
-    in the scope. ``auth_type='oauth-m2m'`` is set explicitly so the SDK does
-    not silently fall back to ambient credentials (the deployed app's own SP
-    env vars, the user's ``databricks-cli`` profile, etc.).
+    ``auth_type='oauth-m2m'`` is set explicitly so the SDK does not silently
+    fall back to ambient credentials (the deployed app's own SP env vars or
+    the local ``databricks-cli`` profile).
     """
+    return WorkspaceClient(
+        host=ws.config.host,
+        client_id=_decode_secret(ws, SECRET_SCOPE, SP_CLIENT_ID_KEY),
+        client_secret=_decode_secret(ws, SECRET_SCOPE, SP_CLIENT_SECRET_KEY),
+        auth_type="oauth-m2m",
+    )
+
+
+def get_db_client(ws: WorkspaceClient) -> WorkspaceClient:
+    """Return the ``WorkspaceClient`` to use for Lakebase calls.
+
+    Dev: the ambient ``ws`` (you). Prod: the admin SP loaded once from
+    ``SECRET_SCOPE`` and cached for the lifetime of the process.
+    """
+    if not is_deployed():
+        return ws
+
     global _lakebase_ws
     if _lakebase_ws is not None:
         return _lakebase_ws
     with _lakebase_ws_lock:
         if _lakebase_ws is not None:
             return _lakebase_ws
-        _lakebase_ws = WorkspaceClient(
-            host=ws.config.host,
-            client_id=_decode_secret(ws, SECRET_SCOPE, SP_CLIENT_ID_KEY),
-            client_secret=_decode_secret(ws, SECRET_SCOPE, SP_CLIENT_SECRET_KEY),
-            auth_type="oauth-m2m",
-        )
+        _lakebase_ws = _build_admin_sp_ws(ws)
         logger.info("Lakebase admin-SP WorkspaceClient initialised")
         return _lakebase_ws
 
 
 def vend_db_token(ws: WorkspaceClient) -> str:
-    """Vend a short-lived OAuth token for the configured Lakebase endpoint.
-
-    The returned token is what Postgres expects as the connection password
-    (the SDK handles the round-trip with the Lakebase control plane).
-    """
+    """Vend a short-lived OAuth token for the configured Lakebase endpoint."""
     return ws.postgres.generate_database_credential(endpoint=ENDPOINT_NAME).token
 
 
 def get_endpoint_host(ws: WorkspaceClient) -> str:
     """Return the read/write hostname of the configured Lakebase endpoint."""
     return ws.postgres.get_endpoint(ENDPOINT_NAME).status.hosts.host
+
+
+def get_postgres_user(ws: WorkspaceClient) -> str:
+    """Postgres role name = SDK ``user_name`` of the authenticated identity.
+
+    Lakebase assigns the user's email (for ``USER`` roles) or the SP's
+    application id (for ``SERVICE_PRINCIPAL`` roles) as the role's
+    ``postgres_role``, which is what we pass as the Postgres ``user``.
+    """
+    return ws.current_user.me().user_name
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +157,9 @@ _pool_lock = threading.Lock()
 
 def _build_pool(ws: WorkspaceClient) -> ConnectionPool:
     """Build a psycopg ``ConnectionPool`` with rotating OAuth tokens."""
-    db_ws = get_lakebase_ws(ws)
+    db_ws = get_db_client(ws)
     host = get_endpoint_host(db_ws)
+    user = get_postgres_user(db_ws)
 
     class _RotatingTokenConnection(psycopg.Connection):
         @classmethod
@@ -160,7 +169,7 @@ def _build_pool(ws: WorkspaceClient) -> ConnectionPool:
             return super().connect(conninfo, **kwargs)
 
     pool = ConnectionPool(
-        conninfo=f"host={host} dbname={DATABASE_NAME} user={POSTGRES_ROLE}",
+        conninfo=f"host={host} dbname={DATABASE_NAME} user={user}",
         connection_class=_RotatingTokenConnection,
         min_size=1,
         max_size=8,
@@ -168,9 +177,10 @@ def _build_pool(ws: WorkspaceClient) -> ConnectionPool:
     )
 
     logger.info(
-        "Lakebase pool created (endpoint=%s, database=%s)",
+        "Lakebase pool created (endpoint=%s, database=%s, user=%s)",
         ENDPOINT_NAME,
         DATABASE_NAME,
+        user,
     )
     return pool  # ty: ignore[invalid-return-type]
 
