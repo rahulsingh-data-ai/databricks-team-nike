@@ -235,10 +235,17 @@ def score_node(state: ReferralState) -> ReferralState:
                 upgrade = llm_map.get(f["unique_id"])
                 if not upgrade:
                     continue
-                f["trust_signal"] = upgrade["trust_signal"]
-                f["trust_rank"] = rank_map.get(upgrade["trust_signal"], 1)
-                f["evidence_summary"] = upgrade.get("evidence_summary", f["evidence_summary"])
-                f["missing_evidence"] = upgrade.get("missing_evidence", f["missing_evidence"])
+                new_signal = upgrade.get("trust_signal")
+                if not isinstance(new_signal, str) or new_signal not in rank_map:
+                    # Defensive: skip this facility's LLM upgrade rather than
+                    # crash the whole batch when the LLM returns garbage.
+                    continue
+                f["trust_signal"] = new_signal
+                f["trust_rank"] = rank_map[new_signal]
+                f["evidence_summary"] = upgrade.get("evidence_summary") or f["evidence_summary"]
+                missing = upgrade.get("missing_evidence")
+                if isinstance(missing, list):
+                    f["missing_evidence"] = [str(m) for m in missing if m]
                 f["agent_reasoning"] = upgrade.get("reasoning", "")
                 f["scoring_method"] = upgrade.get("method", "")
         except Exception as e:  # noqa: BLE001

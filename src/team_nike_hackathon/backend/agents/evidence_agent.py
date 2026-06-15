@@ -11,6 +11,56 @@ from typing import Any
 
 from .llm_client import call_llm, parse_json_from_llm
 
+_ALLOWED_SIGNALS = {
+    "strong_evidence", "partial_evidence", "weak_evidence",
+    "suspicious", "no_evidence",
+}
+
+
+def _coerce_signal(value: Any) -> str | None:
+    """Llama sometimes returns nested objects or markdown — pull a clean signal out."""
+    if isinstance(value, str):
+        v = value.strip().lower().replace(" ", "_")
+        return v if v in _ALLOWED_SIGNALS else None
+    if isinstance(value, dict):
+        for key in ("value", "signal", "label", "name"):
+            inner = value.get(key)
+            if isinstance(inner, str):
+                return _coerce_signal(inner)
+    return None
+
+
+def _coerce_str(value: Any, max_len: int = 600) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()[:max_len]
+    if isinstance(value, dict):
+        # Pull a likely human field out of a nested object
+        for key in ("text", "value", "summary", "reason"):
+            inner = value.get(key)
+            if isinstance(inner, str):
+                return inner.strip()[:max_len]
+    return json.dumps(value, default=str)[:max_len]
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                if item.strip():
+                    out.append(item.strip())
+            elif isinstance(item, dict):
+                out.append(_coerce_str(item))
+        return out
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    return []
+
+
 SYSTEM_PROMPT = """You are a healthcare evidence evaluator for India.
 You assess whether a facility can ACTUALLY provide a specific medical capability,
 based on available evidence. You must be honest about uncertainty.
@@ -93,18 +143,23 @@ def score_evidence_with_llm(
 
             parsed = parse_json_from_llm(answer_text)
 
-            if parsed and "trust_signal" in parsed:
-                results.append({
-                    "unique_id": facility.get("unique_id"),
-                    "trust_signal": parsed["trust_signal"],
-                    "evidence_summary": parsed.get("evidence_summary", ""),
-                    "missing_evidence": parsed.get("missing_evidence", []),
-                    "confidence_note": parsed.get("confidence_note", ""),
-                    "reasoning": thinking,
-                    "method": "llm",
-                })
-                continue
-        except Exception as e:
+            if isinstance(parsed, dict) and "trust_signal" in parsed:
+                signal = _coerce_signal(parsed.get("trust_signal"))
+                summary = _coerce_str(parsed.get("evidence_summary"))
+                missing = _coerce_str_list(parsed.get("missing_evidence"))
+                note = _coerce_str(parsed.get("confidence_note"))
+                if signal:
+                    results.append({
+                        "unique_id": facility.get("unique_id"),
+                        "trust_signal": signal,
+                        "evidence_summary": summary,
+                        "missing_evidence": missing,
+                        "confidence_note": note,
+                        "reasoning": thinking,
+                        "method": "llm",
+                    })
+                    continue
+        except Exception:
             pass
 
         # Fallback: keep existing rule-based score
