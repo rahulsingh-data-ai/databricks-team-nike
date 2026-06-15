@@ -59,7 +59,7 @@ class DatabricksSQLClient:
     def health_check(self) -> dict:
         try:
             count = self.execute_scalar(
-                f"SELECT COUNT(*) FROM {_fqn('facilities')}"
+                f"SELECT COUNT(*) FROM {_fqn('facilities_gold')}"
             )
             return {"status": "connected", "facilities_count": count}
         except Exception as e:

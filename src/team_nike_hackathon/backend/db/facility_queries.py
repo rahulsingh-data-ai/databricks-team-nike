@@ -8,16 +8,14 @@ from typing import Any
 
 from .databricks_sql import DatabricksSQLClient, _fqn, _bronze
 
-# Silver/gold tables (cleaned, pre-computed)
-FACILITIES = _fqn("facilities_clean")
+# Gold table (single source of truth — all columns + trust + search_text)
+FACILITIES_GOLD = _fqn("facilities_gold")
+
+# Supporting tables
 PINCODE = _fqn("pincode_deduped")
 NFHS = _fqn("nfhs_clean")
 CAPABILITY_INDEX = _fqn("capability_index")
-TRUST_SCORES = _fqn("facility_trust_scores")
 DESERT_SCORES = _fqn("desert_scores")
-
-# Bronze tables (raw, for full evidence detail)
-FACILITIES_RAW = _bronze("facilities")
 
 # Known specialties enum values for mapping natural language to DB values
 SPECIALTY_KEYWORDS: dict[str, list[str]] = {
@@ -147,8 +145,11 @@ def search_facilities(
         recency_of_page_update, distinct_social_media_presence_count,
         affiliated_staff_presence, custom_logo_presence,
         number_of_facts_about_the_organization,
+        base_trust_signal, trust_rank, missing_data_count,
+        has_doctors, has_capacity, has_year_established,
+        distinct_source_count, search_text,
         {distance_col}
-    FROM {FACILITIES}
+    FROM {FACILITIES_GOLD}
     WHERE latitude IS NOT NULL
       AND longitude IS NOT NULL
       AND {where_clause}
@@ -159,10 +160,10 @@ def search_facilities(
 
 
 def get_facility_by_id(db: DatabricksSQLClient, facility_id: str) -> dict | None:
-    """Get full facility record from bronze (raw) table for complete evidence."""
+    """Get full facility record from gold table (all columns + trust + search_text)."""
     clean_id = facility_id.strip().replace("'", "''")
     sql = f"""
-    SELECT * FROM {FACILITIES_RAW}
+    SELECT * FROM {FACILITIES_GOLD}
     WHERE unique_id = '{clean_id}'
     """
     rows = db.execute(sql)
