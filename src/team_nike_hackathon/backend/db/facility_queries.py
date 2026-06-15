@@ -184,12 +184,19 @@ def search_facilities(
 
 
 def get_facility_by_id(db: DatabricksSQLClient, facility_id: str) -> dict | None:
-    """Get full facility record from gold table (all columns + trust + search_text)."""
+    """Get full facility record from gold table (all columns + trust + search_text).
+
+    Defensively drops rows where the upstream pipeline misaligned columns
+    (no name / no coordinates) so the detail endpoint never returns a junk
+    record.
+    """
     if not facility_id or not facility_id.strip():
         return None
     sql = f"""
     SELECT * FROM {FACILITIES_GOLD}
     WHERE unique_id = {sql_str(facility_id.strip())}
+      AND name IS NOT NULL
+      AND latitude IS NOT NULL
     """
     rows = db.execute(sql)
     return rows[0] if rows else None

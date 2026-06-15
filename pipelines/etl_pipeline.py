@@ -70,6 +70,14 @@ SELECT
   (NULLIF(NULLIF(NULLIF(NULLIF(capacity, ''), 'null'), '0'), 'unknown') IS NOT NULL) as has_capacity,
   (NULLIF(NULLIF(NULLIF(NULLIF(yearEstablished, ''), 'null'), 'Unknown'), 'unknown') IS NOT NULL) as has_year_established
 FROM {BRONZE}.facilities
+WHERE
+  -- The upstream FDR pipeline emits ~54 misaligned rows where unique_id
+  -- contains markdown fragments and the real fields are shifted into the
+  -- wrong columns. They all lack name + coordinates, so drop them here.
+  name IS NOT NULL
+  AND TRIM(name) <> ''
+  AND latitude IS NOT NULL
+  AND longitude IS NOT NULL
 """)
 
 print(f"facilities_clean: {spark.table(f'{TARGET}.facilities_clean').count()} rows")
