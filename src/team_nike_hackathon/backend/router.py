@@ -107,6 +107,8 @@ def list_specialties(
         except DeltaQueryError as exc:
             logger.warning("list_specialties delta lookup failed: %s", exc)
 
+    if session is None:
+        return []
     try:
         rows = session.execute(
             text(
@@ -1135,7 +1137,11 @@ def search(
 
     quick = _run_delta_search(ws, config, refined_body, origin)
     if quick is None:
-        quick = _run_quick_search(session, refined_body, origin)
+        quick = (
+            _run_quick_search(session, refined_body, origin)
+            if session is not None
+            else []
+        )
 
     candidates = [_candidate_dict(item) for item in quick]
     try:
@@ -1417,6 +1423,11 @@ def create_submission(
     Status starts at ``pending``. Reviewers promote rows into the
     ``facilities`` table out-of-band in SQL.
     """
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Submissions require Lakebase; not configured.",
+        )
     submitted_by = headers.user_email or headers.user_name
     row = FacilitySubmission(
         status=SubmissionStatus.pending,
@@ -1455,6 +1466,8 @@ def list_my_submissions(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> Sequence[SubmissionOut]:
     """Return submissions made by the current user, newest first."""
+    if session is None:
+        return []
     me = headers.user_email or headers.user_name
     if not me:
         return []
@@ -1501,6 +1514,11 @@ def get_facility(
         except DeltaQueryError as exc:
             logger.warning("get_facility delta lookup failed: %s", exc)
 
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Facility not found",
+        )
     try:
         uid = UUID(facility_id)
     except ValueError:
