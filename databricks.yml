@@ -3,18 +3,40 @@ bundle:
 
 sync:
   include:
-    - .build
+    - pipelines
 
-artifacts:
-  default:
-    build: apx build
+variables:
+  bronze_schema:
+    description: "Bronze (source) catalog.schema for raw facilities/pincode/NFHS-5 data"
+    default: "development.dev_gps_research_insights"
+  target_schema:
+    description: "Target Delta catalog.schema for silver/gold tables"
+    default: "development.dev_gps_research_insights"
+  warehouse_id:
+    description: "SQL warehouse used by notebook tasks (when needed)"
+    default: "650f801e25d4c0cc"
 
 resources:
-  apps:
-    team-nike-hackathon-app:
-      name: "team-nike-hackathon"
-      description: "team-nike-hackathon created with apx"
-      source_code_path: ./.build
+  jobs:
+    referral_copilot_etl:
+      name: "[${bundle.target}] referral_copilot_etl"
+      tasks:
+        - task_key: etl_pipeline
+          notebook_task:
+            notebook_path: ./pipelines/etl_pipeline.py
+            base_parameters:
+              bronze_schema: ${var.bronze_schema}
+              target_schema: ${var.target_schema}
+              vs_index: ""  # set later when we create a vector index
+        - task_key: nominatim_refine
+          depends_on:
+            - task_key: etl_pipeline
+          notebook_task:
+            notebook_path: ./pipelines/nominatim_refine.py
+            base_parameters:
+              target_schema: ${var.target_schema}
+      queue:
+        enabled: true
 
 targets:
   dev:
