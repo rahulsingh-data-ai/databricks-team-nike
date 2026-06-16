@@ -17,6 +17,7 @@ src/team_nike_hackathon/_metadata.py
 
 # build files
 dist
+.build/
 
 # js-related
 node_modules/

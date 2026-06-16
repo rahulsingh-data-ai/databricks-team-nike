@@ -3,7 +3,12 @@ bundle:
 
 sync:
   include:
+    - .build
     - pipelines
+
+artifacts:
+  default:
+    build: apx build
 
 variables:
   bronze_schema:
@@ -17,6 +22,11 @@ variables:
     default: "650f801e25d4c0cc"
 
 resources:
+  apps:
+    team-nike-hackathon-app:
+      name: "team-nike-hackathon"
+      description: "team-nike-hackathon created with apx"
+      source_code_path: ./.build
   jobs:
     referral_copilot_etl:
       name: "[${bundle.target}] referral_copilot_etl"
