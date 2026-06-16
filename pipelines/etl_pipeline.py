@@ -52,7 +52,10 @@ SELECT
   CASE WHEN LOWER(TRIM(source_types)) IN ('null','[]') THEN NULL ELSE source_types END AS source_types,
   source_ids, source_urls, source_content_id, source,
   NULLIF(NULLIF(NULLIF(NULLIF(numberDoctors, ''), 'null'), '0'), 'unknown') as numberDoctors,
-  NULLIF(NULLIF(NULLIF(NULLIF(capacity, ''), 'null'), '0'), 'unknown') as capacity,
+  -- ``capacity`` may already be DOUBLE in bronze (Nike Marketplace) or STRING
+  -- (free-tier source). Coerce to STRING first so the empty-string scrub works
+  -- on both shapes; downstream consumers only check IS NULL anyway.
+  NULLIF(NULLIF(NULLIF(NULLIF(CAST(capacity AS STRING), ''), 'null'), '0'), 'unknown') as capacity,
   recency_of_page_update, distinct_social_media_presence_count,
   affiliated_staff_presence, custom_logo_presence,
   number_of_facts_about_the_organization,
@@ -76,7 +79,7 @@ SELECT
   (latitude IS NOT NULL AND longitude IS NOT NULL) as has_coordinates,
   (description IS NOT NULL AND LENGTH(description) > 5) as has_description,
   (NULLIF(NULLIF(NULLIF(NULLIF(numberDoctors, ''), 'null'), '0'), 'unknown') IS NOT NULL) as has_doctors,
-  (NULLIF(NULLIF(NULLIF(NULLIF(capacity, ''), 'null'), '0'), 'unknown') IS NOT NULL) as has_capacity,
+  (NULLIF(NULLIF(NULLIF(NULLIF(CAST(capacity AS STRING), ''), 'null'), '0'), 'unknown') IS NOT NULL) as has_capacity,
   (NULLIF(NULLIF(NULLIF(NULLIF(yearEstablished, ''), 'null'), 'Unknown'), 'unknown') IS NOT NULL) as has_year_established
 FROM {BRONZE}.facilities
 WHERE
@@ -286,6 +289,17 @@ print(f"desert_scores: {spark.table(f'{TARGET}.desert_scores').count()} rows")
 
 # COMMAND ----------
 
+# Ensure ``facility_embeddings`` placeholder exists so the LEFT JOIN below
+# resolves even on a fresh workspace where the Vector Search index hasn't
+# been created yet. When the index sync later writes rows, this table is
+# replaced; until then it's an empty stub.
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {TARGET}.facility_embeddings (
+  unique_id STRING,
+  search_text STRING
+) USING DELTA
+""")
+
 spark.sql(f"""
 CREATE OR REPLACE TABLE {TARGET}.facilities_gold AS
 WITH deduped AS (
@@ -342,6 +356,16 @@ FROM enriched
 """)
 print(f"facilities_gold (pre geo-resolve): {spark.table(f'{TARGET}.facilities_gold').count()} rows")
 
+# Enable column mapping so subsequent ALTER TABLE DROP COLUMN works on a
+# vanilla Delta table (default protocol blocks drops without column mapping).
+spark.sql(f"""
+ALTER TABLE {TARGET}.facilities_gold SET TBLPROPERTIES (
+  'delta.minReaderVersion' = '2',
+  'delta.minWriterVersion' = '5',
+  'delta.columnMapping.mode' = 'name'
+)
+""")
+
 # Drop internal helper columns; they're only needed during the build above.
 spark.sql(f"ALTER TABLE {TARGET}.facilities_gold DROP COLUMNS IF EXISTS (evidence_blob, source_types_lc)")
 
@@ -380,7 +404,7 @@ state_alias AS (
     ('thiruvananthapuram','kerala'),('kochi','kerala'),('ernakulam','kerala'),
     ('kozhikode','kerala'),('malappuram','kerala'),('kollam','kerala')
   ) AS t(alias, canonical)
-)
+),
 pincode_zones AS (
   -- First-digit -> India Post regional zone -> allowed states.
   -- Used to flag impossible combos like a Maharashtra pincode (4xxxxx)
@@ -397,7 +421,7 @@ pincode_zones AS (
               'andaman and nicobar islands')),
     (8, ARRAY('bihar','jharkhand'))
   ) AS t(zone, states)
-)
+),
 scored AS (
   SELECT
     g.unique_id,
@@ -450,6 +474,16 @@ SELECT
 FROM {TARGET}.facilities_gold g
 JOIN scored s ON g.unique_id = s.unique_id
 """)
+
+# Re-enable column mapping after the CREATE OR REPLACE wiped the prior settings.
+spark.sql(f"""
+ALTER TABLE {TARGET}.facilities_gold SET TBLPROPERTIES (
+  'delta.minReaderVersion' = '2',
+  'delta.minWriterVersion' = '5',
+  'delta.columnMapping.mode' = 'name'
+)
+""")
+
 # Drop the now-redundant address_zipOrPostcode (replaced by `pincode`)
 spark.sql(f"ALTER TABLE {TARGET}.facilities_gold DROP COLUMN IF EXISTS address_zipOrPostcode")
 print(f"facilities_gold (with clean geo): {spark.table(f'{TARGET}.facilities_gold').count()} rows")
