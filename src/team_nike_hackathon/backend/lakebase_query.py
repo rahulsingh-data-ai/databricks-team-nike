@@ -39,16 +39,33 @@ from .core._config import logger
 # Lakebase Autoscaling Postgres location
 # ---------------------------------------------------------------------------
 
-PROJECT_ID = "dais-hackathon"
-BRANCH_ID = "production"
-ENDPOINT_ID = "primary"
-ENDPOINT_NAME = (
-    f"projects/{PROJECT_ID}/branches/{BRANCH_ID}/endpoints/{ENDPOINT_ID}"
+# Lakebase endpoint identifier.
+#
+# Two shapes are supported:
+#
+# 1. **Autoscaling Postgres** — projects/branches/endpoints. Used on the
+#    free-tier hackathon workspace. ENDPOINT_NAME looks like
+#    ``projects/<id>/branches/<id>/endpoints/<id>``.
+# 2. **Classic database instance** — a single named instance like
+#    ``GPSI-Lakebase`` on the Nike workspace. ENDPOINT_NAME is just the
+#    instance name; ``LAKEBASE_MODE=classic`` selects this path.
+#
+# Override via env vars: ``LAKEBASE_ENDPOINT_NAME`` (full path or instance
+# name) and ``LAKEBASE_MODE`` (``autoscaling`` | ``classic``).
+LAKEBASE_MODE = os.environ.get("LAKEBASE_MODE", "autoscaling").strip().lower()
+
+_DEFAULT_AUTOSCALING_ENDPOINT = (
+    "projects/dais-hackathon/branches/production/endpoints/primary"
+)
+ENDPOINT_NAME = os.environ.get(
+    "LAKEBASE_ENDPOINT_NAME",
+    os.environ.get("LAKEBASE_INSTANCE_NAME", _DEFAULT_AUTOSCALING_ENDPOINT),
 )
 
-# Postgres database name inside the branch. ``databricks_postgres`` is the
-# built-in default for Lakebase Autoscaling Postgres.
-DATABASE_NAME = "databricks_postgres"
+# Postgres database name. ``databricks_postgres`` is the built-in default
+# for both Lakebase variants; override with ``LAKEBASE_DB`` if you've
+# created a named database inside the instance/branch.
+DATABASE_NAME = os.environ.get("LAKEBASE_DB", "databricks_postgres")
 
 # ---------------------------------------------------------------------------
 # Secret scope (admin-SP OAuth credentials, prod only)
@@ -128,7 +145,26 @@ def get_db_client(ws: WorkspaceClient) -> WorkspaceClient:
 
 
 def vend_db_token(ws: WorkspaceClient) -> str:
-    """Vend a short-lived OAuth token for the configured Lakebase endpoint."""
+    """Vend a short-lived OAuth token for the configured Lakebase endpoint.
+
+    Selects the right SDK call based on ``LAKEBASE_MODE``:
+
+    * ``autoscaling`` uses ``ws.postgres.generate_database_credential``
+    * ``classic`` uses ``ws.database.generate_database_credential``
+    """
+    if LAKEBASE_MODE == "classic":
+        from uuid import uuid4
+
+        cred = ws.database.generate_database_credential(
+            request_id=str(uuid4()),
+            instance_names=[ENDPOINT_NAME],
+        )
+        if not cred.token:
+            raise RuntimeError(
+                f"Lakebase instance {ENDPOINT_NAME!r} returned no token"
+            )
+        return cred.token
+
     cred = ws.postgres.generate_database_credential(endpoint=ENDPOINT_NAME)
     if not cred.token:
         raise RuntimeError(
@@ -139,6 +175,16 @@ def vend_db_token(ws: WorkspaceClient) -> str:
 
 def get_endpoint_host(ws: WorkspaceClient) -> str:
     """Return the read/write hostname of the configured Lakebase endpoint."""
+    if LAKEBASE_MODE == "classic":
+        instance = ws.database.get_database_instance(name=ENDPOINT_NAME)
+        host = getattr(instance, "read_write_dns", None)
+        if not host:
+            raise RuntimeError(
+                f"Lakebase instance {ENDPOINT_NAME!r} is not yet ready "
+                f"(no read_write_dns)."
+            )
+        return host
+
     endpoint = ws.postgres.get_endpoint(ENDPOINT_NAME)
     host = (
         endpoint.status.hosts.host

@@ -19,7 +19,8 @@ from typing import Annotated, Any, AsyncGenerator, TypeAlias
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors.platform import InternalError as _DbxInternalError
-from fastapi import FastAPI, Request
+from databricks.sdk.errors.platform import NotFound as _DbxNotFound
+from fastapi import FastAPI, HTTPException, Request, status
 from sqlalchemy import Engine, create_engine, event
 from sqlmodel import Session, SQLModel, text
 
@@ -159,16 +160,43 @@ class _LakebaseDependency(LifespanDependency):
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
         ws = app.state.workspace_client
-        engine = await _init_engine_with_retry(ws)
-        initialize_models(engine)
-        initialize_extensions(engine)
+        engine: Engine | None = None
+        try:
+            engine = await _init_engine_with_retry(ws)
+            initialize_models(engine)
+            initialize_extensions(engine)
+        except _DbxNotFound as exc:
+            logger.warning(
+                "Lakebase endpoint '%s' not found (%s); app will run in "
+                "Delta-only mode. Lakebase-backed routes (/submissions*) "
+                "will return 503.",
+                ENDPOINT_NAME,
+                exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Lakebase init failed (%s); app will run in Delta-only mode.",
+                exc,
+            )
         app.state.engine = engine
-        yield
-        engine.dispose()
+        try:
+            yield
+        finally:
+            if engine is not None:
+                engine.dispose()
 
     @staticmethod
-    def __call__(request: Request) -> Generator[Session, None, None]:
-        with Session(bind=request.app.state.engine) as session:
+    def __call__(request: Request) -> Generator[Session | None, None, None]:
+        """Yield a Session, or ``None`` when Lakebase isn't configured.
+
+        Delta-backed routes happily ignore the ``None``; persistence-only
+        routes (/submissions*) must check and 503 themselves.
+        """
+        engine = getattr(request.app.state, "engine", None)
+        if engine is None:
+            yield None
+            return
+        with Session(bind=engine) as session:
             yield session
 
 

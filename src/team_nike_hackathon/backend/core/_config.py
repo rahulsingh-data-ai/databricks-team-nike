@@ -34,19 +34,26 @@ class AppConfig(BaseSettings):
     matchcare_endpoint: str = Field(default="")
 
     # Foundation-model endpoint used by the agentic LLM pipeline (query
-    # parser, evidence scorer, recommendation generator). Defaults to the
-    # built-in Llama 3.3 70B that ships pre-deployed in every Databricks
-    # workspace; override to point at a custom fine-tuned endpoint.
-    llm_endpoint: str = Field(default="databricks-meta-llama-3-3-70b-instruct")
+    # parser, evidence scorer, recommendation generator).
+    #
+    # On the Nike workspace the default is Claude Sonnet 4-6, which is
+    # already ready and high-quality. On a fresh workspace where that
+    # endpoint isn't available, override via the
+    # TEAM_NIKE_HACKATHON_LLM_ENDPOINT env var (or fall back to the
+    # built-in Llama 3.3 70B that ships pre-deployed in every workspace).
+    llm_endpoint: str = Field(default="databricks-claude-sonnet-4-6")
 
     # SQL warehouse used to run search against the Unity Catalog Delta
     # tables. Empty disables Delta search and falls back to Lakebase.
+    # Nike default: NikeSoleSql-wdc_glops.
     delta_warehouse_id: str = Field(default="")
 
-    # Fully-qualified Delta table that backs facility search. Schema is
-    # the ``facilities_gold`` shape from the referral-copilot pipeline.
+    # Fully-qualified Delta table that backs facility search. The ETL in
+    # pipelines/etl_pipeline.py writes the same shape regardless of
+    # catalog/schema; on Nike we land tables in
+    # development.dev_gps_research_insights.*.
     delta_facilities_table: str = Field(
-        default="workspace.referral_copilot.facilities_gold"
+        default="development.dev_gps_research_insights.facilities_gold"
     )
 
     @property

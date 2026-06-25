@@ -8,6 +8,9 @@ Sections:
 * Search: deterministic Lakebase shortlist + LLM agentic re-rank
 * Catalog: specialty facet values for the filter UI
 * Submissions: provider self-attest + fieldwork surveyor intake
+* Persistence: shortlists / notes / overrides / decisions \u2014 mounted
+  from ``routes/persistence.py`` (Delta-backed, closes the spec
+  "save or revise" gap without depending on Lakebase).
 """
 
 from __future__ import annotations
@@ -47,8 +50,10 @@ from .models import (
     SubmissionStatus,
     VersionOut,
 )
+from .routes.persistence import router as persistence_router
 
 router = create_router()
+router.include_router(persistence_router)
 
 # ---------------------------------------------------------------------------
 # App-level
@@ -107,6 +112,8 @@ def list_specialties(
         except DeltaQueryError as exc:
             logger.warning("list_specialties delta lookup failed: %s", exc)
 
+    if session is None:
+        return []
     try:
         rows = session.execute(
             text(
@@ -1083,16 +1090,15 @@ def search(
     Returns an empty result list (not a 500) when nothing is found so
     the UI shows the empty-state cleanly.
     """
-    # Decide whether we need the LLM parser. Skip when the caller has
-    # already structured the request — explicit ``location`` coords or
-    # the two-box ``location_text`` field both indicate they don't need
-    # the LLM to disambiguate.
-    has_structured_location = bool(
-        (body.location and body.location.lat is not None and body.location.lng is not None)
-        or (body.location_text and body.location_text.strip())
-    )
+    # Always run the LLM parser when ``query`` is multi-word \u2014 even if
+    # ``location_text`` is set \u2014 so we can extract a concise
+    # ``capability_text`` (e.g. "surgery") from a verbose query
+    # ("emergency surgery"). Single-word queries skip the LLM since
+    # there's nothing to extract.
+    _q_strip = (body.query or "").strip()
+    needs_parser = bool(_q_strip) and len(_q_strip.split()) >= 2
     parsed: dict[str, Any] = {}
-    if body.query and body.query.strip() and not has_structured_location:
+    if needs_parser:
         ws_token = set_workspace(ws)
         ep_token = set_endpoint(config.llm_endpoint) if config.llm_endpoint else None
         try:
@@ -1105,10 +1111,16 @@ def search(
                 reset_endpoint(ep_token)
             reset_workspace(ws_token)
 
+    # Parser may return ``capability_text`` (legacy) or ``capability``
+    # (current schema). Accept either; fall back to the raw user input.
+    _parsed_capability = (
+        (parsed.get("capability_text") if parsed else None)
+        or (parsed.get("capability") if parsed else None)
+    )
     refined_body = body.model_copy(
         update={
             "query": (
-                (parsed.get("capability_text") if parsed else None)
+                _parsed_capability
                 or body.query
                 or ""
             ).strip()
@@ -1135,7 +1147,11 @@ def search(
 
     quick = _run_delta_search(ws, config, refined_body, origin)
     if quick is None:
-        quick = _run_quick_search(session, refined_body, origin)
+        quick = (
+            _run_quick_search(session, refined_body, origin)
+            if session is not None
+            else []
+        )
 
     candidates = [_candidate_dict(item) for item in quick]
     try:
@@ -1417,6 +1433,11 @@ def create_submission(
     Status starts at ``pending``. Reviewers promote rows into the
     ``facilities`` table out-of-band in SQL.
     """
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Submissions require Lakebase; not configured.",
+        )
     submitted_by = headers.user_email or headers.user_name
     row = FacilitySubmission(
         status=SubmissionStatus.pending,
@@ -1455,6 +1476,8 @@ def list_my_submissions(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> Sequence[SubmissionOut]:
     """Return submissions made by the current user, newest first."""
+    if session is None:
+        return []
     me = headers.user_email or headers.user_name
     if not me:
         return []
@@ -1501,6 +1524,11 @@ def get_facility(
         except DeltaQueryError as exc:
             logger.warning("get_facility delta lookup failed: %s", exc)
 
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Facility not found",
+        )
     try:
         uid = UUID(facility_id)
     except ValueError:
